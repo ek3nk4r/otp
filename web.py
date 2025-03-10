@@ -192,10 +192,10 @@ def index():
                 <div>
                     <label class="block text-sm font-medium text-gray-700">محدوده شروع و پایان:</label>
                     <div class="space-y-2">
-                        <label><input type="radio" name="range" value="0-10000" checked> 00000 تا 10000</label>
-                        <label><input type="radio" name="range" value="10000-20000"> 10000 تا 20000</label>
-                        <label><input type="radio" name="range" value="20000-30000"> 20000 تا 30000</label>
-                        <label><input type="radio" name="range" value="30000-40000"> 30000 تا 40000</label>
+                        <label><input type="radio" name="range" value="0-10000" checked> 00000 تا 10000</label>|
+                        <label><input type="radio" name="range" value="10000-20000"> 10000 تا 20000</label>|
+                        <label><input type="radio" name="range" value="20000-30000"> 20000 تا 30000</label>|
+                        <label><input type="radio" name="range" value="30000-40000"> 30000 تا 40000</label>|
                         <label><input type="radio" name="range" value="40000-50000"> 40000 تا 50000</label>
                     </div>
                 </div>
