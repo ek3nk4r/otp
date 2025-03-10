@@ -4,7 +4,7 @@ from http.cookiejar import MozillaCookieJar
 from concurrent.futures import ThreadPoolExecutor
 import time
 import sys
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, request  # اصلاح‌شده
 from flask_socketio import SocketIO, emit
 import threading
 
@@ -13,7 +13,7 @@ TELEGRAM_BOT_TOKEN = "5858689331:AAH3pdfEDVSIF9AaPsWCGQiZzltgkKVtKr8"  # توک�
 TELEGRAM_CHAT_ID = "102046811"     # آیدی چتت رو اینجا بذار
 
 app = Flask(__name__)
-socketio = SocketIO(app, async_mode='eventlet')
+socketio = SocketIO(app)
 
 # متغیرهای گلوبال برای کنترل پروسه
 running = False
@@ -277,4 +277,4 @@ def stop():
     return '', 204
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=8181, debug=True)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
