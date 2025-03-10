@@ -89,7 +89,7 @@ mobile = sys.argv[3]
 # تنظیمات رنج
 start_range = 50000
 end_range = 75000
-batch_size = 100
+batch_size = 20
 
 found_success = False
 for batch_start in range(start_range, end_range, batch_size):
