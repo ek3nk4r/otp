@@ -2,27 +2,25 @@ import requests
 from flask import Flask, render_template_string, request
 from flask_socketio import SocketIO, emit
 import threading
-import socketio
+import socketio  # برای کلاینت WebSocket
 
 app = Flask(__name__)
 socketio = SocketIO(app)
 
-# لیست سرورهای ریموت
+# لیست سرورهای ریموت (10 تا کردمش با توجه به لاگ‌ها)
 REMOTE_SERVERS = [
     "http://63.142.254.127:5000",
     "http://63.142.246.30:5000",
     "http://185.189.27.75:5000",
     "http://185.189.27.62:5000",
     "http://185.185.126.164:5000",
-    "http://104.251.211.205:5000",
+    "http://104.251.211.205:5000",  # این آپدیت شده
     "http://185.189.27.11:5000",
     "http://185.183.182.217:5000",
     "http://185.183.182.137:5000",
     "http://104.251.219.67:5000",
-    # اگه سرور دهم داری، اینجا اضافه کن
 ]
 
-# رنج‌ها برای هر سرور (بر اساس تعداد سرورها تنظیم می‌شه)
 RANGES = [
     (0, 10000),
     (10000, 20000),
@@ -32,8 +30,8 @@ RANGES = [
     (50000, 60000),
     (60000, 70000),
     (70000, 80000),
-    (80000, 90000),  # 9 تا سرور داریم، این تنظیم شده
-    (90000, 99999), 
+    (80000, 90000),
+    (90000, 99999),
 ]
 
 progress_log = []
@@ -43,9 +41,10 @@ sio_clients = []
 def connect_to_remotes():
     """اتصال به WebSocket همه سرورهای ریموت"""
     global sio_clients
+    sio_clients = []  # ریست کردن کلاینت‌ها
     for server in REMOTE_SERVERS:
         try:
-            client = socketio.Client()
+            client = socketio.Client()  # استفاده از socketio.Client
             client.connect(server)
 
             @client.on('update_progress')
@@ -208,7 +207,7 @@ def start():
 
     found_success = False
     progress_log = []
-    sio_clients = []  # ریست کردن کلاینت‌ها
+    sio_clients = []
     progress_log.append("Starting distribution to remote servers...")
     socketio.emit('update_progress', {'log': progress_log[-1]})
 
