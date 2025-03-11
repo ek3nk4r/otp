@@ -162,7 +162,7 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
                 progress_log.append("Stopping: Successful code found!")
             else:
                 progress_log.append("Process stopped manually!")
-           socketio.emit('remote_log', {'log': progress_log[-1]})
+                socketio.emit('remote_log', {'log': progress_log[-1]})
             break
 
         batch_end = min(batch_start + batch_size, end_range)
@@ -180,11 +180,11 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
                         found_success = True
                         running = False
                         progress_log.append("Process stopped because a successful code was found!")
-                       socketio.emit('remote_log', {'log': progress_log[-1]})
+                        socketio.emit('remote_log', {'log': progress_log[-1]})
                         break  # از حلقه داخلی هم خارج می‌شیم
                 except Exception as e:
                     progress_log.append(f"Exception in future: {str(e)}")
-                   socketio.emit('remote_log', {'log': progress_log[-1]})
+                    socketio.emit('remote_log', {'log': progress_log[-1]})
 
         if not found_success:
             time.sleep(0.1)  # تأخیر خیلی کم برای سرعت بیشتر
@@ -359,7 +359,7 @@ def stop():
     global running
     running = False
     progress_log.append("Stop button clicked!")
-   socketio.emit('remote_log', {'log': progress_log[-1]})
+    socketio.emit('remote_log', {'log': progress_log[-1]})
     return '', 204
 
 if __name__ == '__main__':
