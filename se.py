@@ -2,19 +2,18 @@ import requests
 from flask import Flask, render_template_string, request
 from flask_socketio import SocketIO, emit
 import threading
-import socketio  # برای کلاینت WebSocket
+import time
 
 app = Flask(__name__)
 socketio = SocketIO(app)
 
-# لیست سرورهای ریموت (10 تا کردمش با توجه به لاگ‌ها)
 REMOTE_SERVERS = [
     "http://63.142.254.127:5000",
     "http://63.142.246.30:5000",
     "http://185.189.27.75:5000",
     "http://185.189.27.62:5000",
     "http://185.185.126.164:5000",
-    "http://104.251.211.205:5000",  # این آپدیت شده
+    "http://104.251.211.205:5000",
     "http://185.189.27.11:5000",
     "http://185.183.182.217:5000",
     "http://185.183.182.137:5000",
@@ -36,35 +35,7 @@ RANGES = [
 
 progress_log = []
 found_success = False
-sio_clients = []
-
-def connect_to_remotes():
-    """اتصال به WebSocket همه سرورهای ریموت"""
-    global sio_clients
-    sio_clients = []  # ریست کردن کلاینت‌ها
-    for server in REMOTE_SERVERS:
-        try:
-            client = socketio.Client()  # استفاده از socketio.Client
-            client.connect(server)
-
-            @client.on('update_progress')
-            def on_update_progress(data):
-                global found_success
-                log = data['log']
-                progress_log.append(f"[Remote {server}] {log}")
-                socketio.emit('update_progress', {'log': progress_log[-1]})
-                if "Success with code" in log or "Process stopped because a successful code was found" in log:
-                    found_success = True
-                    progress_log.append("Success found on a remote server! Stopping all servers...")
-                    socketio.emit('update_progress', {'log': progress_log[-1]})
-                    stop_all_servers()
-
-            sio_clients.append(client)
-            progress_log.append(f"Connected to WebSocket of {server}")
-            socketio.emit('update_progress', {'log': progress_log[-1]})
-        except Exception as e:
-            progress_log.append(f"Failed to connect to WebSocket of {server}: {str(e)}")
-            socketio.emit('update_progress', {'log': progress_log[-1]})
+monitoring = False
 
 def send_to_remote(server_url, host, nonce, mobile, connections, start_range, end_range):
     """ارسال درخواست به سرور ریموت"""
@@ -91,6 +62,33 @@ def stop_all_servers():
         except requests.exceptions.RequestException as e:
             progress_log.append(f"Failed to stop {server}: {str(e)}")
             socketio.emit('update_progress', {'log': progress_log[-1]})
+
+def monitor_status():
+    """مانیتور کردن وضعیت ورکرها هر 5 ثانیه"""
+    global monitoring, found_success
+    while monitoring:
+        for server in REMOTE_SERVERS:
+            try:
+                response = requests.get(f"{server}/status", timeout=5)
+                response.raise_for_status()
+                status = response.json()
+                log = f"[Remote {server}] Running: {status['running']}, Processed: {status['processed']}/{status['current_range']['end']}"
+                if status["error"]:
+                    log += f", Error: {status['error']}"
+                progress_log.append(log)
+                socketio.emit('update_progress', {'log': progress_log[-1]})
+
+                if status["error"] and "Success found!" in status["error"]:
+                    found_success = True
+                    progress_log.append("Success found on a remote server! Stopping all servers...")
+                    socketio.emit('update_progress', {'log': progress_log[-1]})
+                    stop_all_servers()
+                    monitoring = False
+                    break
+            except requests.exceptions.RequestException as e:
+                progress_log.append(f"Failed to get status from {server}: {str(e)}")
+                socketio.emit('update_progress', {'log': progress_log[-1]})
+        time.sleep(5)  # هر 5 ثانیه چک کن
 
 @app.route('/')
 def index():
@@ -198,7 +196,7 @@ def index():
 
 @app.route('/start', methods=['POST'])
 def start():
-    global progress_log, found_success, sio_clients
+    global progress_log, found_success, monitoring
     data = request.get_json()
     host = data['host']
     nonce = data['nonce']
@@ -207,14 +205,10 @@ def start():
 
     found_success = False
     progress_log = []
-    sio_clients = []
+    monitoring = True
     progress_log.append("Starting distribution to remote servers...")
     socketio.emit('update_progress', {'log': progress_log[-1]})
 
-    # اتصال به WebSocket ریموت‌ها
-    threading.Thread(target=connect_to_remotes).start()
-
-    # ارسال درخواست به ریموت‌ها
     threads = []
     for i, server in enumerate(REMOTE_SERVERS):
         start_range, end_range = RANGES[i]
@@ -225,18 +219,16 @@ def start():
     for thread in threads:
         thread.join()
 
+    # شروع مانیتورینگ وضعیت
+    threading.Thread(target=monitor_status, daemon=True).start()
+
     return '', 204
 
 @app.route('/stop', methods=['POST'])
 def stop():
-    global progress_log, sio_clients
+    global progress_log, monitoring
+    monitoring = False
     stop_all_servers()
-    for client in sio_clients:
-        try:
-            client.disconnect()
-        except:
-            pass
-    sio_clients = []
     return '', 204
 
 if __name__ == '__main__':
