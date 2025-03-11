@@ -212,7 +212,7 @@ def index():
             <form id="form" class="space-y-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700">هاست:</label>
-                    <input type="text" id="host" class="mt-1 block w-full p-2 border rounded" value="www.arzanpanel-iran.com">
+                    <input type="text" id="host" class="mt-1 block w-full p-2 border rounded" value="hos.com">
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700">Nonce:</label>
@@ -220,7 +220,7 @@ def index():
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700">شماره موبایل:</label>
-                    <input type="text" id="mobile" class="mt-1 block w-full p-2 border rounded" value="09039495749">
+                    <input type="text" id="mobile" class="mt-1 block w-full p-2 border rounded" value="0914">
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700">تعداد کانکشن‌ها:</label>
