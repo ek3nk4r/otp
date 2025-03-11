@@ -135,7 +135,7 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
                     return False
             except json.JSONDecodeError:
                 progress_log.append(f"Error parsing JSON for code {code_str} (number {counter})")
-               socketio.emit('remote_log', {'log': progress_log[-1]})
+                socketio.emit('remote_log', {'log': progress_log[-1]})
                 return False
         except requests.exceptions.RequestException as e:
             progress_log.append(f"Network error with code {code_str} (attempt {attempt + 1}/{max_retries + 1}): {str(e)}")
