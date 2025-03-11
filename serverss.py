@@ -1,8 +1,7 @@
 import requests
-from flask import Flask, render_template_string, request
+from flask import Flask, render_template_string, request, jsonify
 from flask_socketio import SocketIO, emit
 import threading
-import time
 
 app = Flask(__name__)
 socketio = SocketIO(app)
@@ -35,7 +34,6 @@ RANGES = [
 
 progress_log = []
 found_success = False
-monitoring = False
 
 def send_to_remote(server_url, host, nonce, mobile, connections, start_range, end_range):
     """ارسال درخواست به سرور ریموت"""
@@ -64,7 +62,7 @@ def stop_all_servers():
             socketio.emit('update_progress', {'log': progress_log[-1]})
 
 def get_worker_status():
-    """جمع‌آوری وضعیت ورکرها"""
+    """جمع‌آوری وضعیت ورکرها با درخواست پایتونی"""
     status_data = {}
     for server in REMOTE_SERVERS:
         try:
@@ -111,7 +109,7 @@ def index():
             #progress-table tr:nth-child(even) { background-color: #f9f9f9; }
             #progress-table tr:hover { background-color: #f1f1f1; }
             .status-active { color: green; font-weight: bold; }
-TER .status-inactive { color: red; font-weight: bold; }
+            .status-inactive { color: red; font-weight: bold; }
             .error-cell { color: #d9534f; max-width: 300px; word-wrap: break-word; }
         </style>
     </head>
@@ -210,6 +208,7 @@ TER .status-inactive { color: red; font-weight: bold; }
                     })
                     .catch(error => {
                         console.error('Error fetching status:', error);
+                        tableBody.innerHTML = '<tr><td colspan="5">خطا در دریافت وضعیت</td></tr>';
                     });
             }
 
@@ -260,7 +259,7 @@ TER .status-inactive { color: red; font-weight: bold; }
 
 @app.route('/start', methods=['POST'])
 def start():
-    global progress_log, found_success, monitoring
+    global progress_log, found_success
     data = request.get_json()
     host = data['host']
     nonce = data['nonce']
@@ -269,7 +268,6 @@ def start():
 
     found_success = False
     progress_log = []
-    monitoring = True
     progress_log.append("Starting distribution to remote servers...")
     socketio.emit('update_progress', {'log': progress_log[-1]})
 
@@ -287,8 +285,7 @@ def start():
 
 @app.route('/stop', methods=['POST'])
 def stop():
-    global progress_log, monitoring
-    monitoring = False
+    global progress_log
     stop_all_servers()
     return '', 204
 
