@@ -88,7 +88,7 @@ def monitor_status():
             except requests.exceptions.RequestException as e:
                 progress_log.append(f"Failed to get status from {server}: {str(e)}")
                 socketio.emit('update_progress', {'log': progress_log[-1]})
-        time.sleep(5)  # هر 5 ثانیه چک کن
+        time.sleep(5)
 
 @app.route('/')
 def index():
@@ -102,39 +102,60 @@ def index():
         <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.js"></script>
         <style>
             body { direction: rtl; font-family: Arial, sans-serif; }
-            #progress { height: 300px; overflow-y: auto; }
-            .range-option { transition: all 0.2s; }
-            .range-option:hover { background-color: #e5e7eb; }
+            .container { max-width: 1200px; margin: 0 auto; }
+            #progress-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+            #progress-table th, #progress-table td { border: 1px solid #ddd; padding: 12px; text-align: center; }
+            #progress-table th { background-color: #f2f2f2; font-weight: bold; }
+            #progress-table tr:nth-child(even) { background-color: #f9f9f9; }
+            #progress-table tr:hover { background-color: #f1f1f1; }
+            .status-active { color: green; font-weight: bold; }
+            .status-inactive { color: red; font-weight: bold; }
+            .error-cell { color: #d9534f; max-width: 300px; word-wrap: break-word; }
         </style>
     </head>
-    <body class="bg-gray-100 p-6">
-        <div class="max-w-2xl mx-auto bg-white p-6 rounded-lg shadow-lg">
-            <h1 class="text-2xl font-bold text-center mb-6">بررسی کد OTP - سرور مرکزی</h1>
-            <form id="form" class="space-y-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">هاست:</label>
-                    <input type="text" id="host" class="mt-1 block w-full p-2 border rounded" value="www.arzanpanel-iran.com">
+    <body class="bg-gray-100 p-8">
+        <div class="container">
+            <div class="bg-white p-8 rounded-lg shadow-lg">
+                <h1 class="text-3xl font-bold text-center mb-8">بررسی کد OTP - سرور مرکزی</h1>
+                <form id="form" class="space-y-6">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">هاست:</label>
+                        <input type="text" id="host" class="mt-1 block w-full p-3 border rounded-lg" value="www.arzanpanel-iran.com">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Nonce:</label>
+                        <input type="text" id="nonce" class="mt-1 block w-full p-3 border rounded-lg" value="9d6178e07d">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">شماره موبایل:</label>
+                        <input type="text" id="mobile" class="mt-1 block w-full p-3 border rounded-lg" value="09039495749">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">تعداد کانکشن‌ها:</label>
+                        <input type="number" id="connections" class="mt-1 block w-full p-3 border rounded-lg" value="20">
+                    </div>
+                    <div class="flex space-x-6">
+                        <button type="button" id="start" class="w-full bg-green-500 text-white p-3 rounded-lg hover:bg-green-600">شروع</button>
+                        <button type="button" id="stop" class="w-full bg-red-500 text-white p-3 rounded-lg hover:bg-red-600" disabled>توقف</button>
+                    </div>
+                </form>
+                <div class="mt-8">
+                    <h2 class="text-xl font-semibold text-center mb-4">وضعیت سرورها</h2>
+                    <table id="progress-table">
+                        <thead>
+                            <tr>
+                                <th>سرور</th>
+                                <th>وضعیت</th>
+                                <th>رنج فعلی</th>
+                                <th>تعداد پردازش‌شده</th>
+                                <th>خطا</th>
+                            </tr>
+                        </thead>
+                        <tbody id="table-body">
+                            <!-- جدول با AJAX پر می‌شه -->
+                        </tbody>
+                    </table>
                 </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">Nonce:</label>
-                    <input type="text" id="nonce" class="mt-1 block w-full p-2 border rounded" value="9d6178e07d">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">شماره موبایل:</label>
-                    <input type="text" id="mobile" class="mt-1 block w-full p-2 border rounded" value="09039495749">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700">تعداد کانکشن‌ها:</label>
-                    <input type="number" id="connections" class="mt-1 block w-full p-2 border rounded" value="20">
-                </div>
-                <div class="flex space-x-4">
-                    <button type="button" id="start" class="w-full bg-green-500 text-white p-2 rounded hover:bg-green-600">شروع</button>
-                    <button type="button" id="stop" class="w-full bg-red-500 text-white p-2 rounded hover:bg-red-600" disabled>توقف</button>
-                </div>
-            </form>
-            <div class="mt-6">
-                <h2 class="text-lg font-semibold">پیشرفت:</h2>
-                <div id="progress" class="bg-gray-50 p-4 rounded border text-sm"></div>
             </div>
         </div>
 
@@ -143,23 +164,67 @@ def index():
             const form = document.getElementById('form');
             const startBtn = document.getElementById('start');
             const stopBtn = document.getElementById('stop');
-            const progressDiv = document.getElementById('progress');
-            const maxLogs = 20;
+            const tableBody = document.getElementById('table-body');
 
-            socket.on('connect', () => {
-                console.log('Connected to WebSocket');
-            });
+            // لیست سرورها برای جدول
+            const servers = [
+                "http://63.142.254.127:5000",
+                "http://63.142.246.30:5000",
+                "http://185.189.27.75:5000",
+                "http://185.189.27.62:5000",
+                "http://185.185.126.164:5000",
+                "http://104.251.211.205:5000",
+                "http://185.189.27.11:5000",
+                "http://185.183.182.217:5000",
+                "http://185.183.182.137:5000",
+                "http://104.251.219.67:5000"
+            ];
 
-            socket.on('update_progress', function(data) {
-                console.log('Received update:', data);
-                const log = document.createElement('p');
-                log.textContent = data.log;
-                progressDiv.appendChild(log);
-                while (progressDiv.children.length > maxLogs) {
-                    progressDiv.removeChild(progressDiv.firstChild);
-                }
-                progressDiv.scrollTop = progressDiv.scrollHeight;
-            });
+            // آپدیت جدول با AJAX
+            function updateTable() {
+                servers.forEach(server => {
+                    fetch(`${server}/status`)
+                        .then(response => response.json())
+                        .then(data => {
+                            const rowId = `row-${server.replace(/[:\/\.]/g, '-')}`;
+                            let row = document.getElementById(rowId);
+                            if (!row) {
+                                row = document.createElement('tr');
+                                row.id = rowId;
+                                tableBody.appendChild(row);
+                            }
+                            row.innerHTML = `
+                                <td>${server}</td>
+                                <td class="${data.running ? 'status-active' : 'status-inactive'}">
+                                    ${data.running ? 'فعال' : 'غیرفعال'}
+                                </td>
+                                <td>${data.current_range.start} - ${data.current_range.end}</td>
+                                <td>${data.processed} / ${data.current_range.end}</td>
+                                <td class="error-cell">${data.error || '-'}</td>
+                            `;
+                        })
+                        .catch(error => {
+                            const rowId = `row-${server.replace(/[:\/\.]/g, '-')}`;
+                            let row = document.getElementById(rowId);
+                            if (!row) {
+                                row = document.createElement('tr');
+                                row.id = rowId;
+                                tableBody.appendChild(row);
+                            }
+                            row.innerHTML = `
+                                <td>${server}</td>
+                                <td class="status-inactive">غیرفعال</td>
+                                <td>-</td>
+                                <td>-</td>
+                                <td class="error-cell">خطا در اتصال: ${error.message}</td>
+                            `;
+                        });
+                });
+            }
+
+            // هر 5 ثانیه جدول رو آپدیت کن
+            setInterval(updateTable, 5000);
+            updateTable(); // اولین بار موقع لود
 
             startBtn.addEventListener('click', () => {
                 const host = document.getElementById('host').value;
@@ -188,6 +253,14 @@ def index():
                     startBtn.disabled = false;
                     stopBtn.disabled = true;
                 });
+            });
+
+            socket.on('connect', () => {
+                console.log('Connected to WebSocket');
+            });
+
+            socket.on('update_progress', function(data) {
+                console.log('Log:', data.log);
             });
         </script>
     </body>
