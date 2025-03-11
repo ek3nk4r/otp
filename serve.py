@@ -64,20 +64,21 @@ def stop_all_servers():
             socketio.emit('update_progress', {'log': progress_log[-1]})
 
 def monitor_status():
-    """مانیتور کردن وضعیت ورکرها هر 5 ثانیه"""
+    """مانیتور کردن وضعیت ورکرها هر 5 ثانیه و ارسال به کلاینت"""
     global monitoring, found_success
     while monitoring:
+        status_data = {}
         for server in REMOTE_SERVERS:
             try:
                 response = requests.get(f"{server}/status", timeout=5)
                 response.raise_for_status()
                 status = response.json()
-                log = f"[Remote {server}] Running: {status['running']}, Processed: {status['processed']}/{status['current_range']['end']}"
-                if status["error"]:
-                    log += f", Error: {status['error']}"
-                progress_log.append(log)
-                socketio.emit('update_progress', {'log': progress_log[-1]})
-
+                status_data[server] = {
+                    "running": status["running"],
+                    "current_range": status["current_range"],
+                    "processed": status["processed"],
+                    "error": status["error"]
+                }
                 if status["error"] and "Success found!" in status["error"]:
                     found_success = True
                     progress_log.append("Success found on a remote server! Stopping all servers...")
@@ -86,8 +87,13 @@ def monitor_status():
                     monitoring = False
                     break
             except requests.exceptions.RequestException as e:
-                progress_log.append(f"Failed to get status from {server}: {str(e)}")
-                socketio.emit('update_progress', {'log': progress_log[-1]})
+                status_data[server] = {
+                    "running": False,
+                    "current_range": {"start": "-", "end": "-"},
+                    "processed": "-",
+                    "error": f"Failed to connect: {str(e)}"
+                }
+        socketio.emit('update_table', status_data)
         time.sleep(5)
 
 @app.route('/')
@@ -152,7 +158,7 @@ def index():
                             </tr>
                         </thead>
                         <tbody id="table-body">
-                            <!-- جدول با AJAX پر می‌شه -->
+                            <!-- جدول با WebSocket پر می‌شه -->
                         </tbody>
                     </table>
                 </div>
@@ -166,7 +172,7 @@ def index():
             const stopBtn = document.getElementById('stop');
             const tableBody = document.getElementById('table-body');
 
-            // لیست سرورها برای جدول
+            // لیست سرورها
             const servers = [
                 "http://63.142.254.127:5000",
                 "http://63.142.246.30:5000",
@@ -180,51 +186,36 @@ def index():
                 "http://104.251.219.67:5000"
             ];
 
-            // آپدیت جدول با AJAX
-            function updateTable() {
-                servers.forEach(server => {
-                    fetch(`${server}/status`)
-                        .then(response => response.json())
-                        .then(data => {
-                            const rowId = `row-${server.replace(/[:\/\.]/g, '-')}`;
-                            let row = document.getElementById(rowId);
-                            if (!row) {
-                                row = document.createElement('tr');
-                                row.id = rowId;
-                                tableBody.appendChild(row);
-                            }
-                            row.innerHTML = `
-                                <td>${server}</td>
-                                <td class="${data.running ? 'status-active' : 'status-inactive'}">
-                                    ${data.running ? 'فعال' : 'غیرفعال'}
-                                </td>
-                                <td>${data.current_range.start} - ${data.current_range.end}</td>
-                                <td>${data.processed} / ${data.current_range.end}</td>
-                                <td class="error-cell">${data.error || '-'}</td>
-                            `;
-                        })
-                        .catch(error => {
-                            const rowId = `row-${server.replace(/[:\/\.]/g, '-')}`;
-                            let row = document.getElementById(rowId);
-                            if (!row) {
-                                row = document.createElement('tr');
-                                row.id = rowId;
-                                tableBody.appendChild(row);
-                            }
-                            row.innerHTML = `
-                                <td>${server}</td>
-                                <td class="status-inactive">غیرفعال</td>
-                                <td>-</td>
-                                <td>-</td>
-                                <td class="error-cell">خطا در اتصال: ${error.message}</td>
-                            `;
-                        });
-                });
-            }
+            socket.on('connect', () => {
+                console.log('Connected to WebSocket');
+            });
 
-            // هر 5 ثانیه جدول رو آپدیت کن
-            setInterval(updateTable, 5000);
-            updateTable(); // اولین بار موقع لود
+            socket.on('update_table', (data) => {
+                tableBody.innerHTML = ''; // پاک کردن جدول قبلی
+                servers.forEach(server => {
+                    const status = data[server] || {
+                        running: false,
+                        current_range: { start: '-', end: '-' },
+                        processed: '-',
+                        error: 'No data available'
+                    };
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${server}</td>
+                        <td class="${status.running ? 'status-active' : 'status-inactive'}">
+                            ${status.running ? 'فعال' : 'غیرفعال'}
+                        </td>
+                        <td>${status.current_range.start} - ${status.current_range.end}</td>
+                        <td>${status.processed} / ${status.current_range.end}</td>
+                        <td class="error-cell">${status.error || '-'}</td>
+                    `;
+                    tableBody.appendChild(row);
+                });
+            });
+
+            socket.on('update_progress', (data) => {
+                console.log('Log:', data.log);
+            });
 
             startBtn.addEventListener('click', () => {
                 const host = document.getElementById('host').value;
@@ -253,14 +244,6 @@ def index():
                     startBtn.disabled = false;
                     stopBtn.disabled = true;
                 });
-            });
-
-            socket.on('connect', () => {
-                console.log('Connected to WebSocket');
-            });
-
-            socket.on('update_progress', function(data) {
-                console.log('Log:', data.log);
             });
         </script>
     </body>
