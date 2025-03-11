@@ -137,7 +137,7 @@ def index():
             </form>
             <div class="mt-6">
                 <h2 class="text-lg font-semibold">پیشرفت:</h2>
-                <div id="progress" class="bg-gray-50 p-4 rounded border text-sm"></div>
+                <div id="progress" class="bg-gray-50 p-4 rounded border text-sm" style="direction: ltr;></div>
             </div>
         </div>
 
