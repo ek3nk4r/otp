@@ -30,7 +30,7 @@ current_status = {
 
 def send_file_to_telegram(file_path, retries=3):
     """ارسال فایل به تلگرام با تلاش مجدد در صورت خطا"""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+    url = f"https://go.tensha.ir/proxy/https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
     for attempt in range(retries):
         try:
             if not os.path.exists(file_path):
