@@ -2,7 +2,6 @@ import requests
 from flask import Flask, render_template_string, request, jsonify
 from flask_socketio import SocketIO, emit
 import threading
-import time
 
 app = Flask(__name__)
 socketio = SocketIO(app)
@@ -36,30 +35,12 @@ RANGES = [
 progress_log = []
 found_success = False
 success_codes = []
-proxy_setting = ""  # متغیر گلوبال برای پروکسی
 
-# تابع فرضی برای گرفتن پروکسی از مرکزی
-def get_proxy_from_central():
-    # اینجا باید منطق واقعی پروکسی مرکزی رو بذاری (مثلاً API)
-    return "socks5://new_user:new_pass@new_host:new_port"
-
-# آپدیت خودکار پروکسی هر ثانیه (فقط وقتی دستی تنظیم نشده)
-def update_proxy_from_central():
-    global proxy_setting
-    while True:
-        if not proxy_setting:  # اگه پروکسی دستی تنظیم نشده باشه
-            new_proxy = get_proxy_from_central()
-            proxy_setting = new_proxy
-            progress_log.append(f"Updated proxy from central: {new_proxy}")
-            socketio.emit('update_progress', {'log': progress_log[-1]})
-        time.sleep(1)
-
-# شروع آپدیت پروکسی در پس‌زمینه
-threading.Thread(target=update_proxy_from_central, daemon=True).start()
-
-def send_to_remote(server_url, host, nonce, mobile, connections, start_range, end_range):
+def send_to_remote(server_url, host, nonce, mobile, connections, start_range, end_range, proxy_ip="", proxy_port=""):
     """ارسال درخواست به سرور ریموت"""
     try:
+        # ساخت آدرس پروکسی اگه IP و پورت داده شده باشه
+        proxy = f"socks5://{proxy_ip}:{proxy_port}" if proxy_ip and proxy_port else ""
         response = requests.post(
             f"{server_url}/start",
             json={
@@ -69,7 +50,7 @@ def send_to_remote(server_url, host, nonce, mobile, connections, start_range, en
                 "connections": connections,
                 "startRange": start_range,
                 "endRange": end_range,
-                "proxy": proxy_setting  # ارسال پروکسی به ورکر
+                "proxy": proxy  # ارسال پروکسی به ورکر (اگه خالی باشه، "" می‌فرسته)
             },
             timeout=10
         )
@@ -170,8 +151,12 @@ def index():
                         <input type="number" id="connections" class="mt-1 block w-full p-3 border rounded-lg" value="20">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-700">پروکسی (SOCKS5):</label>
-                        <input type="text" id="proxy" class="mt-1 block w-full p-3 border rounded-lg" placeholder="مثال: socks5://user:pass@host:port">
+                        <label class="block text-sm font-medium text-gray-700">آی‌پی پروکسی (SOCKS5):</label>
+                        <input type="text" id="proxy_ip" class="mt-1 block w-full p-3 border rounded-lg" placeholder="مثال: 192.168.1.1">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">پورت پروکسی:</label>
+                        <input type="text" id="proxy_port" class="mt-1 block w-full p-3 border rounded-lg" placeholder="مثال: 1080">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">نوع اسکن:</label>
@@ -315,7 +300,8 @@ def index():
                 const nonce = document.getElementById('nonce').value;
                 const mobile = document.getElementById('mobile').value;
                 const connections = document.getElementById('connections').value;
-                const proxy = document.getElementById('proxy').value;
+                const proxy_ip = document.getElementById('proxy_ip').value;
+                const proxy_port = document.getElementById('proxy_port').value;
                 const scanType = document.querySelector('input[name="scan_type"]:checked').value;
                 let startRange = null;
                 let endRange = null;
@@ -332,18 +318,12 @@ def index():
                 fetch('/start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ host, nonce, mobile, connections, scan_type: scanType, start_range: startRange, end_range: endRange, proxy })
+                    body: JSON.stringify({ host, nonce, mobile, connections, proxy_ip, proxy_port, scan_type: scanType, start_range: startRange, end_range: endRange })
                 }).then(response => {
                     if (response.ok) {
                         startBtn.disabled = true;
                         stopBtn.disabled = false;
                     }
-                });
-
-                fetch('/set_proxy', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ proxy })
                 });
             });
 
@@ -368,6 +348,8 @@ def start():
     nonce = data['nonce']
     mobile = data['mobile']
     connections = int(data['connections'])
+    proxy_ip = data.get('proxy_ip', '')
+    proxy_port = data.get('proxy_port', '')
     scan_type = data.get('scan_type', 'full')
     start_range = data.get('start_range')
     end_range = data.get('end_range')
@@ -394,7 +376,7 @@ def start():
     threads = []
     for i, server in enumerate(REMOTE_SERVERS):
         start_r, end_r = ranges[i]
-        thread = threading.Thread(target=send_to_remote, args=(server, host, nonce, mobile, connections, start_r, end_r))
+        thread = threading.Thread(target=send_to_remote, args=(server, host, nonce, mobile, connections, start_r, end_r, proxy_ip, proxy_port))
         threads.append(thread)
         thread.start()
 
@@ -407,15 +389,6 @@ def start():
 def stop():
     global progress_log
     stop_all_servers()
-    return '', 204
-
-@app.route('/set_proxy', methods=['POST'])
-def set_proxy():
-    global proxy_setting
-    data = request.get_json()
-    proxy_setting = data.get('proxy', '')
-    progress_log.append(f"Proxy set to: {proxy_setting}")
-    socketio.emit('update_progress', {'log': progress_log[-1]})
     return '', 204
 
 @app.route('/get_status', methods=['GET'])
