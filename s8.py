@@ -18,7 +18,6 @@ REMOTE_SERVERS = [
     "http://104.251.219.67:5000",
 ]
 
-# حذف RANGES ثابت و استفاده از تابع پویا
 def generate_ranges(num_servers):
     total_range = 100000  # از 0 تا 99999
     chunk_size = total_range // num_servers
@@ -185,7 +184,9 @@ def index():
                                 <th>سرور</th>
                                 <th>وضعیت</th>
                                 <th>رنج فعلی</th>
-                                <th>تعداد پردازش‌شده</th>
+                                <th>تعداد 
+   
+پردازش‌شده</th>
                                 <th>خطا</th>
                             </tr>
                         </thead>
@@ -219,15 +220,15 @@ def index():
             const successBody = document.getElementById('success-body');
 
             const servers = [
-    "http://63.142.254.127:5000",
-    "http://63.142.246.30:5000",
-    "http://185.189.27.75:5000",
-    "http://185.185.126.164:5000",
-    "http://104.251.211.205:5000",
-    "http://185.189.27.11:5000",
-    "http://185.183.182.217:5000",
-    "http://185.183.182.137:5000",
-    "http://104.251.219.67:5000",
+                "http://63.142.254.127:5000",
+                "http://63.142.246.30:5000",
+                "http://185.189.27.75:5000",
+                "http://185.185.126.164:5000",
+                "http://104.251.211.205:5000",
+                "http://185.189.27.11:5000",
+                "http://185.183.182.217:5000",
+                "http://185.183.182.137:5000",
+                "http://104.251.219.67:5000",
             ];
 
             function updateTables() {
@@ -287,7 +288,7 @@ def index():
 
             startBtn.addEventListener('click', () => {
                 const host = document.getElementById('host').value;
-bundled                const nonce = document.getElementById('nonce').value;
+                const nonce = document.getElementById('nonce').value;
                 const mobile = document.getElementById('mobile').value;
                 const connections = document.getElementById('connections').value;
                 const proxy_ip = document.getElementById('proxy_ip').value;
@@ -351,7 +352,7 @@ def start():
     socketio.emit('update_progress', {'log': progress_log[-1]})
 
     if scan_type == 'full':
-        ranges = generate_ranges(len(REMOTE_SERVERS))  # رنج‌ها به صورت پویا بر اساس تعداد سرورها
+        ranges = generate_ranges(len(REMOTE_SERVERS))
     else:
         start_range = int(start_range)
         end_range = int(end_range)
