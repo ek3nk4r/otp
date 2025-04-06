@@ -19,9 +19,10 @@ REMOTE_SERVERS = [
 ]
 
 def generate_ranges(num_servers):
-    total_range = 100000  # از 0 تا 99999
+    total_range = 100000  # از 00000 تا 99999
     chunk_size = total_range // num_servers
-    return [(i * chunk_size, (i + 1) * chunk_size if i < num_servers - 1 else total_range) for i in range(num_servers)]
+    ranges = [(i * chunk_size, (i + 1) * chunk_size if i < num_servers - 1 else total_range) for i in range(num_servers)]
+    return [(f"{start:05d}", f"{end - 1:05d}") for start, end in ranges]  # رشته‌های ۵ رقمی
 
 progress_log = []
 found_success = False
