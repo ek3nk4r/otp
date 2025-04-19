@@ -75,6 +75,8 @@ def fetch_nonce(host, mobile):
             data=f"user_login_nonce={user_login_nonce}&_wp_http_referer=%2Flogin%2F&action=kandopanel_user_login&redirect=&log={mobile}&pwd=&otp=1",
             timeout=10
         )
+        
+        response = requests.get(f"https://{host}/login/?action=login-by-otp&mobile={mobile}", timeout=10)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         login_otp_nonce = soup.find('input', {'id': 'login_otp_nonce'})['value']
