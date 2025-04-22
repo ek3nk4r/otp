@@ -84,8 +84,9 @@ def send_request(host, login_otp_nonce, mobile, code_values, counter, proxy="", 
         if stop_event.is_set():
             return False
         try:
-            # اگه پروکسی باشه، با پروکسی درخواست رو بفرست
+            # اگه پروکسی باشه، با پروکسی SOCKS5 درخواست رو بفرست
             if proxy:
+                # اطمینان از استفاده از فرمت SOCKS5
                 proxies = {"http": proxy, "https": proxy}
                 try:
                     response = requests.post(url, headers=headers, data=data, proxies=proxies, timeout=15)
