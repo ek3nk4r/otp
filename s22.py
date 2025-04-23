@@ -139,7 +139,7 @@ def resend_otp(host, mobile, nonce):
 
 def auto_stop_and_restart():
     global current_operation, found_success
-    time.sleep(20 * 60)  # 20 دقیقه صبر
+    time.sleep(40 * 60)  # 20 دقیقه صبر
     stop_all_servers()
     
     message = "⏹️ تمام سرورها بعد از ۲۰ دقیقه متوقف شدند"
