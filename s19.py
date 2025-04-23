@@ -303,7 +303,7 @@ def index():
                 <form id="form" class="space-y-6">
                     <div>
                         <label class="block text-sm font-medium text-gray-700">هاست:</label>
-                        <input type="text" id="host" class="mt-1 block w-full p-3 border rounded-lg" value="iranigram.com">
+                        <input type="text" id="host" class="mt-1 block w-full p-3 border rounded-lg" value="0an0m.com">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">Nonce:</label>
@@ -311,7 +311,7 @@ def index():
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">شماره موبایل:</label>
-                        <input type="text" id="mobile" class="mt-1 block w-full p-3 border rounded-lg" value="09214541602">
+                        <input type="text" id="mobile" class="mt-1 block w-full p-3 border rounded-lg" value="0">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">تعداد کانکشن‌ها:</label>
@@ -319,7 +319,7 @@ def index():
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">پروکسی (SOCKS5):</label>
-                        <input type="text" id="proxy" class="mt-1 block w-full p-3 border rounded-lg" placeholder="مثال: socks5://user:pass@host:port">
+                        <input type="text" id="proxy" class="mt-1 block w-full p-3 border rounded-lg" placeholder="مثال: socks5://user:pass@host:port" value="51.195.229.194:13001">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">نوع اسکن:</label>
