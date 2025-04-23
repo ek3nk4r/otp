@@ -597,7 +597,10 @@ def start():
     threads = []
     for i, server in enumerate(REMOTE_SERVERS):
         start_r, end_r = ranges[i]
-        thread = threading.Thread(target=send_to_remote, args=(server, host,weather, nonce, mobile, connections, start_r, end_r))
+        thread = threading.Thread(
+            target=send_to_remote,
+            args=(server, host, nonce, mobile, connections, start_r, end_r)
+        )
         threads.append(thread)
         thread.start()
 
