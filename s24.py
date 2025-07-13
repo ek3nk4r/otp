@@ -14,27 +14,17 @@ TELEGRAM_BOT_TOKEN = "6374641003:AAFG0isVhi6pxBzZDythU96FaTrtEiVQIHY"
 TELEGRAM_CHAT_ID = "-4796694839"
 
 REMOTE_SERVERS = [
-    "http://63.142.254.127:5000",
-    "http://63.142.246.30:5000",
-    "http://185.185.126.164:5000",
-    "http://104.251.211.205:5000",
-    "http://185.189.27.11:5000",
-    "http://185.183.182.137:5000",
-    "http://104.251.219.67:5000",
+    "http://23.95.197.222:5000",
+    "http://198.12.88.145:5000",
+    "http://192.227.134.68:5000",
 ]
 
 RANGES = [
-    (0, 10000),
-    (10000, 20000),
-    (20000, 30000),
-    (30000, 40000),
-    (40000, 50000),
-    (50000, 60000),
-    (60000, 70000),
-    (70000, 80000),
-    (80000, 90000),
-    (90000, 99999),
+    (0, 33333),
+    (33333, 66666),
+    (66666, 99999),
 ]
+
 
 progress_log = []
 found_success = False
@@ -417,13 +407,9 @@ def index():
             const operationBody = document.getElementById('operation-body');
 
             const servers = [
-                "http://63.142.254.127:5000",
-                "http://63.142.246.30:5000",
-                "http://185.185.126.164:5000",
-                "http://104.251.211.205:5000",
-                "http://185.189.27.11:5000",
-                "http://185.183.182.137:5000",
-                "http://104.251.219.67:5000"
+    "http://23.95.197.222:5000",
+    "http://198.12.88.145:5000",
+    "http://192.227.134.68:5000",
             ];
 
             function updateTables() {
@@ -670,4 +656,4 @@ def fetch_nonce_route():
     return jsonify({'error': 'دریافت nonce ناموفق بود'}), 400
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+    socketio.run(app, host='0.0.0.0', port=6000, debug=True)
