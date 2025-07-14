@@ -304,7 +304,7 @@ def index():
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">Nonce:</label>
-                        <input type="text" id="nonce" class="mt-1 block w-full p-3 border rounded-lg" readonly>
+                        <input type="text" id="nonce" class="mt-1 block w-full p-3 border rounded-lg" >
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700">شماره موبایل:</label>
