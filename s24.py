@@ -104,12 +104,13 @@ def fetch_nonce(host, mobile):
     """Fetches the login_otp_nonce from the target website, with proxy fallback for 403 errors."""
     try:
         use_proxy = False
+        # Corrected proxy URL format as identified by the user
         base_proxy_url = "https://go.tensha.ir/proxy/https://"
 
         def get_url(base_url):
             """Constructs the correct URL, applying proxy if needed."""
             if use_proxy:
-                # The proxy takes the URL without the protocol part
+                # The proxy expects the target URL without its own protocol part
                 return base_proxy_url + base_url.replace('https://', '')
             return base_url
 
