@@ -504,7 +504,7 @@ def start_new_operation():
     return jsonify({"message": "Operation started."}), 202
 
 @app.route('/resend/<int:index>', methods=['POST'])
-def resend_from_history():
+def resend_from_history(index):
     if app_state.current_operation.get('is_running'):
         return jsonify({"error": "An operation is already in progress."}), 409
     with app_state.lock:
